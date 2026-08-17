@@ -9,8 +9,6 @@ import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { SignatureField } from "@/components/signature-pad";
-import { SealBarcodeScanner } from "@/components/seal-barcode-scanner";
-import { ScanBarcode } from "lucide-react";
 import { CHECKPOINT_SEAL_COLORS, SEAL_COLOR_LABELS } from "@/lib/constants";
 import type { SealColor } from "@/lib/database.types";
 
@@ -35,7 +33,6 @@ export function PartRedqForm({ transactionId, officerName, officerStaffId }: Par
   const [newSealNumber, setNewSealNumber] = useState("");
   const [newSealColor, setNewSealColor] = useState<SealColor | "">("");
   const [signature, setSignature] = useState<string | null>(null);
-  const [scanningField, setScanningField] = useState<"old" | "new" | null>(null);
 
   const ready =
     !!signature &&
@@ -63,37 +60,17 @@ export function PartRedqForm({ transactionId, officerName, officerStaffId }: Par
               <CardTitle className="text-base">1. Verify Old Seal</CardTitle>
             </CardHeader>
             <CardContent className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-2 sm:col-span-2">
+              <div className="space-y-2">
                 <Label htmlFor="old_seal_number">Old Seal Number</Label>
-                <div className="flex items-center gap-2">
-                  <Input
-                    id="old_seal_number"
-                    name="old_seal_number"
-                    placeholder="As physically observed"
-                    value={oldSealNumber}
-                    onChange={(e) => setOldSealNumber(e.target.value)}
-                    className="font-mono"
-                    required
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    aria-label="Scan old seal barcode"
-                    onClick={() => setScanningField(scanningField === "old" ? null : "old")}
-                  >
-                    <ScanBarcode className="h-4 w-4" />
-                  </Button>
-                </div>
-                {scanningField === "old" ? (
-                  <SealBarcodeScanner
-                    onDetected={(value) => {
-                      setOldSealNumber(value);
-                      setScanningField(null);
-                    }}
-                    onClose={() => setScanningField(null)}
-                  />
-                ) : null}
+                <Input
+                  id="old_seal_number"
+                  name="old_seal_number"
+                  placeholder="As physically observed"
+                  value={oldSealNumber}
+                  onChange={(e) => setOldSealNumber(e.target.value)}
+                  className="font-mono text-foreground"
+                  required
+                />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="old_seal_color">Old Seal Colour</Label>
@@ -122,37 +99,17 @@ export function PartRedqForm({ transactionId, officerName, officerStaffId }: Par
               <CardTitle className="text-base">2. Apply New Seal</CardTitle>
             </CardHeader>
             <CardContent className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-2 sm:col-span-2">
+              <div className="space-y-2">
                 <Label htmlFor="new_seal_number">New Seal Number</Label>
-                <div className="flex items-center gap-2">
-                  <Input
-                    id="new_seal_number"
-                    name="new_seal_number"
-                    placeholder="e.g. RDQ-1234"
-                    value={newSealNumber}
-                    onChange={(e) => setNewSealNumber(e.target.value)}
-                    className="font-mono"
-                    required
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    aria-label="Scan new seal barcode"
-                    onClick={() => setScanningField(scanningField === "new" ? null : "new")}
-                  >
-                    <ScanBarcode className="h-4 w-4" />
-                  </Button>
-                </div>
-                {scanningField === "new" ? (
-                  <SealBarcodeScanner
-                    onDetected={(value) => {
-                      setNewSealNumber(value);
-                      setScanningField(null);
-                    }}
-                    onClose={() => setScanningField(null)}
-                  />
-                ) : null}
+                <Input
+                  id="new_seal_number"
+                  name="new_seal_number"
+                  placeholder="e.g. RDQ-1234"
+                  value={newSealNumber}
+                  onChange={(e) => setNewSealNumber(e.target.value)}
+                  className="font-mono text-foreground"
+                  required
+                />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="new_seal_color">New Seal Colour</Label>
