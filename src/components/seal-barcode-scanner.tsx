@@ -45,7 +45,7 @@ const DECODE_INTERVAL_MS = 1000 / DECODE_FPS;
 // Bumped whenever this file changes meaningfully — shown on-screen so a
 // field report ("still doesn't work") can be checked against whether the
 // device actually picked up the latest deploy before debugging further.
-const SCANNER_BUILD = "diag-5";
+const SCANNER_BUILD = "diag-6";
 
 /**
  * Live camera barcode scanner for physical seal tags.
@@ -60,10 +60,11 @@ const SCANNER_BUILD = "diag-5";
  * (confirmed via the on-screen preview of the exact image handed to the
  * decoder) with zero results for hundreds of consecutive frames — the
  * signature of results being silently discarded, not of a decode
- * failure. `returnErrors: true` here surfaces those instead of dropping
- * them; the officer still visually re-verifies the scanned value against
- * the physical seal before submitting; same as every other field in this
- * app's "blind verification" checkpoints.
+ * failure. `returnErrors: true` here surfaces those results instead of
+ * dropping them — but they're still only ever a candidate, never
+ * auto-accepted: only a result whose checksum actually validated
+ * (`isValid`) is treated as a real read, so a checksum-failed decode
+ * can't hand the officer a garbled value dressed up as a clean scan.
  *
  * Every tick alternates between two decode passes, because each one
  * covers the other's blind spot:
@@ -179,7 +180,13 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
             consecutiveErrorsRef.current = 0; // a clean resolve means the decoder is alive
             setDecoderStatus("ready");
             setAttempts((n) => n + 1);
-            const hit = results.find((r) => r.text.trim().length > 0);
+            // returnErrors:true (above) surfaces checksum-failed reads
+            // instead of silently dropping them — necessary to diagnose
+            // the original bug, but it means garbled/misread attempts
+            // now show up in `results` too. Only ever act on a read that
+            // passed its format's checksum; a checksum-failed decode is
+            // exactly as untrustworthy as it sounds; keep scanning.
+            const hit = results.find((r) => r.isValid && r.text.trim().length > 0);
             if (hit) {
               handledRef.current = true;
               onDetectedRef.current(hit.text.trim());
