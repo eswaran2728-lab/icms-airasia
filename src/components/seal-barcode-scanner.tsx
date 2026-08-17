@@ -45,7 +45,7 @@ const DECODE_INTERVAL_MS = 1000 / DECODE_FPS;
 // Bumped whenever this file changes meaningfully — shown on-screen so a
 // field report ("still doesn't work") can be checked against whether the
 // device actually picked up the latest deploy before debugging further.
-const SCANNER_BUILD = "diag-6";
+const SCANNER_BUILD = "diag-7";
 
 /**
  * Live camera barcode scanner for physical seal tags.
@@ -133,8 +133,12 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
       const scale = sw < MIN_CROP_DECODE_WIDTH ? MIN_CROP_DECODE_WIDTH / sw : 1;
       previewCanvas.width = Math.round(sw * scale);
       previewCanvas.height = Math.round(sh * scale);
-      previewCtx.imageSmoothingEnabled = true;
-      previewCtx.imageSmoothingQuality = "high";
+      // Smoothing looks nicer but blurs the hard bar/space edges a
+      // barcode decoder measures module widths from — it was quietly
+      // sabotaging every upscaled decode attempt (checksum-failing
+      // consistently, not randomly, which is what a systematically
+      // softened edge does). Nearest-neighbour keeps edges sharp.
+      previewCtx.imageSmoothingEnabled = false;
       previewCtx.drawImage(video, sx, sy, sw, sh, 0, 0, previewCanvas.width, previewCanvas.height);
       return previewCtx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
     };
