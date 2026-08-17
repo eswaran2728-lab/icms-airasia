@@ -6,11 +6,13 @@ import { signedUrl, uploadPdfBuffer } from "@/lib/storage";
 import { formatDateTime } from "@/lib/utils";
 import { loadOfficialTemplate, drawValue, drawWrapped, drawSignature, markSelected, markCargoTick } from "@/lib/pdf-overlay";
 import type { OfficialFormKind } from "@/lib/pdf-templates";
+import { VENDOR_FORM_COORDS } from "@/lib/completed-form-pdf-vendor";
 import type {
   CargoType,
   PartA,
   PartBC,
   PartD,
+  PartHub,
   Seal,
   SealVerification,
   Transaction,
@@ -357,6 +359,114 @@ async function overlayIfcsf(
 }
 
 /**
+ * HUB-route transactions (A -> B -> Part Hub, terminal) have no official
+ * paper form of their own — the IFCSF outbound page assumes a Part C/D
+ * that HUB never has. Per operational decision, HUB-route completed forms
+ * instead overlay onto the vendor "Supplies Security Form" template
+ * (AA/SEC/F/019), reusing its 3-signature layout: Part A -> Part A
+ * (warehouse PIC/driver check-in), Part B -> Part B (In-flight Post AVSEC
+ * observed check), Part Hub -> Part C's warehouse/supervisor column (the
+ * single confirming signer; the vendor-driver column has no HUB-route
+ * counterpart and stays blank).
+ */
+async function overlayHub(
+  transaction: Transaction,
+  partA: PartA | null,
+  partB: PartBC | null,
+  partHub: PartHub | null,
+  seals: Seal[],
+  verifications: SealVerification[],
+  signatures: { part_a: Buffer | null; part_b: Buffer | null; part_hub: Buffer | null }
+): Promise<Uint8Array> {
+  const { pdfDoc, page, font } = await loadOfficialTemplate("VENDOR");
+  const C = VENDOR_FORM_COORDS;
+
+  const activeSealNumbers = seals
+    .filter((s) => !s.superseded_at)
+    .map((s) => s.seal_number)
+    .join(", ");
+
+  // Part A (Vendor column) <- catering Part A (warehouse PIC check-in).
+  drawValue(page, font, C.partA.driverName.x, C.partA.driverName.y, transaction.driver_name, { maxWidth: 280 });
+  drawValue(page, font, C.partA.nric.x, C.partA.nric.y, transaction.driver_id);
+  drawValue(page, font, C.partA.sealNo.x, C.partA.sealNo.y, activeSealNumbers);
+  drawValue(page, font, C.partA.dateTime.x, C.partA.dateTime.y, formatDateTime(partA?.completed_at ?? null));
+  await drawSignature(
+    pdfDoc,
+    page,
+    signatures.part_a,
+    C.partA.signature.x,
+    C.partA.signature.y,
+    C.partA.signature.w,
+    C.partA.signature.h
+  );
+
+  // Part B (AirAsia Security column) <- catering Part B (In-flight Post AVSEC).
+  const partBCheckpoint = "INFLIGHT_POST" as const;
+  drawValue(page, font, C.partB.vehicleNo.x, C.partB.vehicleNo.y, partB?.observed_vehicle_number);
+  drawValue(
+    page,
+    font,
+    C.partB.driverNameNric.x,
+    C.partB.driverNameNric.y,
+    partB ? `${partB.observed_driver_name ?? "—"} / ${partB.observed_driver_id ?? "—"}` : null,
+    { maxWidth: 280 }
+  );
+  drawValue(
+    page,
+    font,
+    C.partB.sealNo.x,
+    C.partB.sealNo.y,
+    sealNumbersAt(partBCheckpoint, verifications) || activeSealNumbers
+  );
+  drawWrapped(page, font, C.partB.remarks.x, C.partB.remarks.yTop, partB?.remarks, {
+    maxWidth: C.partB.remarks.maxWidth,
+    maxLines: C.partB.remarks.maxLines,
+    lineHeight: C.partB.remarks.lineHeight,
+  });
+  drawValue(
+    page,
+    font,
+    C.partB.dateTime.x,
+    C.partB.dateTime.y,
+    partB ? `${partB.checkpoint_date} ${partB.checkpoint_time}` : null
+  );
+  await drawSignature(
+    pdfDoc,
+    page,
+    signatures.part_b,
+    C.partB.signature.x,
+    C.partB.signature.y,
+    C.partB.signature.w,
+    C.partB.signature.h
+  );
+
+  // Part C, warehouse/supervisor column <- catering Part Hub (delivery
+  // confirmation). Vendor-driver column left blank — no HUB counterpart.
+  await drawSignature(
+    pdfDoc,
+    page,
+    signatures.part_hub,
+    C.partC.warehouseSignature.x,
+    C.partC.warehouseSignature.y,
+    C.partC.warehouseSignature.w,
+    C.partC.warehouseSignature.h
+  );
+  drawValue(page, font, C.partC.warehouseName.x, C.partC.warehouseName.y, partHub?.hub_avsec_name, {
+    maxWidth: 220,
+  });
+  drawValue(
+    page,
+    font,
+    C.partC.warehouseDate.x,
+    C.partC.warehouseDate.y,
+    formatDateTime(partHub?.completed_at ?? null)
+  );
+
+  return pdfDoc.save();
+}
+
+/**
  * Auto-runs right after a transaction reaches COMPLETED (Part D pass, Part
  * D skip, Part Hub, or the inbound final Part B) so the finished official
  * IFCSF form exists for the admin to pull up without anyone opening the
@@ -364,15 +474,14 @@ async function overlayIfcsf(
  * checkpoint that just completed — it's an audit artifact, not part of
  * the workflow gate.
  *
- * Overlays ICMS transaction data onto the actual official IFCSF PDF
- * (templates/forms/ifcsf/ifcsf-inbound-outbound.pdf — Outbound page 1,
- * Inbound page 2) rather than generating a custom layout. HUB/REDQ-route
- * transactions are OUTBOUND at the direction level and use the same
- * Outbound page; those routes' own steps (Part Hub / Part REDQ) have no
- * counterpart on the official paper form (it predates that workflow
- * extension), so only the fields that exist on the form are filled —
- * Part C/Part D simply stay blank for those routes, same as any other
- * "not completed" field.
+ * Overlays ICMS transaction data onto an actual official PDF rather than
+ * generating a custom layout. Direction/route pick the physical form:
+ * INBOUND -> ifcsf-inbound-outbound.pdf page 2, plain OUTBOUND and
+ * REDQ-route (still OUTBOUND at the direction level; Part REDQ has no
+ * counterpart on the paper form, so it's simply not drawn) -> page 1;
+ * HUB-route has no IFCSF counterpart at all (that form predates the HUB
+ * workflow) and instead overlays onto the vendor Supplies Security Form
+ * template (see overlayHub above).
  */
 export async function generateCompletedFormPdf(transactionId: string): Promise<void> {
   try {
@@ -382,17 +491,19 @@ export async function generateCompletedFormPdf(transactionId: string): Promise<v
     const transaction = txRow as Transaction;
     if (transaction.status !== "COMPLETED") return;
 
-    const [partARes, partBRes, partCRes, partDRes, sealsRes] = await Promise.all([
+    const [partARes, partBRes, partCRes, partDRes, partHubRes, sealsRes] = await Promise.all([
       supabase.from("part_a").select("*").eq("transaction_id", transactionId).maybeSingle(),
       supabase.from("part_b").select("*").eq("transaction_id", transactionId).maybeSingle(),
       supabase.from("part_c").select("*").eq("transaction_id", transactionId).maybeSingle(),
       supabase.from("part_d").select("*").eq("transaction_id", transactionId).maybeSingle(),
+      supabase.from("part_hub").select("*").eq("transaction_id", transactionId).maybeSingle(),
       supabase.from("seals").select("*").eq("transaction_id", transactionId),
     ]);
     const partA = partARes.data as PartA | null;
     const partB = partBRes.data as PartBC | null;
     const partC = partCRes.data as PartBC | null;
     const partD = partDRes.data as PartD | null;
+    const partHub = partHubRes.data as PartHub | null;
     const seals = (sealsRes.data ?? []) as Seal[];
 
     const sealIds = seals.map((s) => s.id);
@@ -402,19 +513,27 @@ export async function generateCompletedFormPdf(transactionId: string): Promise<v
           | null) ?? [])
       : [];
 
-    const [sigA, sigB, sigC, sigD] = await Promise.all([
+    const [sigA, sigB, sigC, sigD, sigHub] = await Promise.all([
       signatureBytes(partA?.signature_url ?? null),
       signatureBytes(partB?.signature_url ?? null),
       signatureBytes(partC?.signature_url ?? null),
       signatureBytes(partD?.signature_url ?? null),
+      signatureBytes(partHub?.signature_url ?? null),
     ]);
 
-    const pdfBytes = await overlayIfcsf(transaction, partA, partB, partC, partD, seals, verifications, {
-      part_a: sigA,
-      part_b: sigB,
-      part_c: sigC,
-      part_d: sigD,
-    });
+    const pdfBytes =
+      transaction.route === "HUB"
+        ? await overlayHub(transaction, partA, partB, partHub, seals, verifications, {
+            part_a: sigA,
+            part_b: sigB,
+            part_hub: sigHub,
+          })
+        : await overlayIfcsf(transaction, partA, partB, partC, partD, seals, verifications, {
+            part_a: sigA,
+            part_b: sigB,
+            part_c: sigC,
+            part_d: sigD,
+          });
     const bytes = Buffer.from(pdfBytes);
 
     const path = await uploadPdfBuffer("completed-forms", bytes, transaction.transaction_number);

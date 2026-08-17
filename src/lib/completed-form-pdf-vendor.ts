@@ -24,7 +24,9 @@ async function signatureBytes(path: string | null): Promise<Buffer | null> {
 // form.pdf (PDF space, origin bottom-left) — extracted from the official
 // file's own printed blank-line positions.
 // ---------------------------------------------------------------------
-const COORDS = {
+// Exported so completed-form-pdf.ts can overlay HUB-route catering
+// transactions onto this same physical template (see overlayHub there).
+export const VENDOR_FORM_COORDS = {
   partA: {
     driverName: { x: 264, y: 581.2 },
     nric: { x: 264, y: 566.3 },
@@ -59,57 +61,57 @@ async function overlayVendorForm(
   const { pdfDoc, page, font } = await loadOfficialTemplate("VENDOR");
 
   // Part A (Vendor).
-  drawValue(page, font, COORDS.partA.driverName.x, COORDS.partA.driverName.y, partA?.driver_name, { maxWidth: 280 });
-  drawValue(page, font, COORDS.partA.nric.x, COORDS.partA.nric.y, partA?.nric_number);
-  drawValue(page, font, COORDS.partA.sealNo.x, COORDS.partA.sealNo.y, partA?.seal_number);
+  drawValue(page, font, VENDOR_FORM_COORDS.partA.driverName.x, VENDOR_FORM_COORDS.partA.driverName.y, partA?.driver_name, { maxWidth: 280 });
+  drawValue(page, font, VENDOR_FORM_COORDS.partA.nric.x, VENDOR_FORM_COORDS.partA.nric.y, partA?.nric_number);
+  drawValue(page, font, VENDOR_FORM_COORDS.partA.sealNo.x, VENDOR_FORM_COORDS.partA.sealNo.y, partA?.seal_number);
   drawValue(
     page,
     font,
-    COORDS.partA.dateTime.x,
-    COORDS.partA.dateTime.y,
+    VENDOR_FORM_COORDS.partA.dateTime.x,
+    VENDOR_FORM_COORDS.partA.dateTime.y,
     formatDateTime(partA?.completed_at ?? null)
   );
   await drawSignature(
     pdfDoc,
     page,
     signatures.part_a,
-    COORDS.partA.signature.x,
-    COORDS.partA.signature.y,
-    COORDS.partA.signature.w,
-    COORDS.partA.signature.h
+    VENDOR_FORM_COORDS.partA.signature.x,
+    VENDOR_FORM_COORDS.partA.signature.y,
+    VENDOR_FORM_COORDS.partA.signature.w,
+    VENDOR_FORM_COORDS.partA.signature.h
   );
 
   // Part B (AirAsia Security).
-  drawValue(page, font, COORDS.partB.vehicleNo.x, COORDS.partB.vehicleNo.y, partB?.vehicle_registration_no);
+  drawValue(page, font, VENDOR_FORM_COORDS.partB.vehicleNo.x, VENDOR_FORM_COORDS.partB.vehicleNo.y, partB?.vehicle_registration_no);
   drawValue(
     page,
     font,
-    COORDS.partB.driverNameNric.x,
-    COORDS.partB.driverNameNric.y,
+    VENDOR_FORM_COORDS.partB.driverNameNric.x,
+    VENDOR_FORM_COORDS.partB.driverNameNric.y,
     partB ? `${partB.driver_name} / ${partB.driver_nric}` : null,
     { maxWidth: 280 }
   );
-  drawValue(page, font, COORDS.partB.sealNo.x, COORDS.partB.sealNo.y, partB?.seal_number);
-  drawWrapped(page, font, COORDS.partB.remarks.x, COORDS.partB.remarks.yTop, partB?.remarks, {
-    maxWidth: COORDS.partB.remarks.maxWidth,
-    maxLines: COORDS.partB.remarks.maxLines,
-    lineHeight: COORDS.partB.remarks.lineHeight,
+  drawValue(page, font, VENDOR_FORM_COORDS.partB.sealNo.x, VENDOR_FORM_COORDS.partB.sealNo.y, partB?.seal_number);
+  drawWrapped(page, font, VENDOR_FORM_COORDS.partB.remarks.x, VENDOR_FORM_COORDS.partB.remarks.yTop, partB?.remarks, {
+    maxWidth: VENDOR_FORM_COORDS.partB.remarks.maxWidth,
+    maxLines: VENDOR_FORM_COORDS.partB.remarks.maxLines,
+    lineHeight: VENDOR_FORM_COORDS.partB.remarks.lineHeight,
   });
   drawValue(
     page,
     font,
-    COORDS.partB.dateTime.x,
-    COORDS.partB.dateTime.y,
+    VENDOR_FORM_COORDS.partB.dateTime.x,
+    VENDOR_FORM_COORDS.partB.dateTime.y,
     formatDateTime(partB?.completed_at ?? null)
   );
   await drawSignature(
     pdfDoc,
     page,
     signatures.part_b,
-    COORDS.partB.signature.x,
-    COORDS.partB.signature.y,
-    COORDS.partB.signature.w,
-    COORDS.partB.signature.h
+    VENDOR_FORM_COORDS.partB.signature.x,
+    VENDOR_FORM_COORDS.partB.signature.y,
+    VENDOR_FORM_COORDS.partB.signature.w,
+    VENDOR_FORM_COORDS.partB.signature.h
   );
 
   // Part C (Warehouse — In-Flight), dual certification: left column is
@@ -119,38 +121,38 @@ async function overlayVendorForm(
     pdfDoc,
     page,
     signatures.vendor,
-    COORDS.partC.vendorSignature.x,
-    COORDS.partC.vendorSignature.y,
-    COORDS.partC.vendorSignature.w,
-    COORDS.partC.vendorSignature.h
+    VENDOR_FORM_COORDS.partC.vendorSignature.x,
+    VENDOR_FORM_COORDS.partC.vendorSignature.y,
+    VENDOR_FORM_COORDS.partC.vendorSignature.w,
+    VENDOR_FORM_COORDS.partC.vendorSignature.h
   );
   await drawSignature(
     pdfDoc,
     page,
     signatures.warehouse,
-    COORDS.partC.warehouseSignature.x,
-    COORDS.partC.warehouseSignature.y,
-    COORDS.partC.warehouseSignature.w,
-    COORDS.partC.warehouseSignature.h
+    VENDOR_FORM_COORDS.partC.warehouseSignature.x,
+    VENDOR_FORM_COORDS.partC.warehouseSignature.y,
+    VENDOR_FORM_COORDS.partC.warehouseSignature.w,
+    VENDOR_FORM_COORDS.partC.warehouseSignature.h
   );
-  drawValue(page, font, COORDS.partC.vendorName.x, COORDS.partC.vendorName.y, partC?.vendor_driver_name, {
+  drawValue(page, font, VENDOR_FORM_COORDS.partC.vendorName.x, VENDOR_FORM_COORDS.partC.vendorName.y, partC?.vendor_driver_name, {
     maxWidth: 220,
   });
-  drawValue(page, font, COORDS.partC.warehouseName.x, COORDS.partC.warehouseName.y, partC?.warehouse_pic_name, {
+  drawValue(page, font, VENDOR_FORM_COORDS.partC.warehouseName.x, VENDOR_FORM_COORDS.partC.warehouseName.y, partC?.warehouse_pic_name, {
     maxWidth: 220,
   });
   drawValue(
     page,
     font,
-    COORDS.partC.vendorDate.x,
-    COORDS.partC.vendorDate.y,
+    VENDOR_FORM_COORDS.partC.vendorDate.x,
+    VENDOR_FORM_COORDS.partC.vendorDate.y,
     formatDateTime(partC?.vendor_signed_at ?? null)
   );
   drawValue(
     page,
     font,
-    COORDS.partC.warehouseDate.x,
-    COORDS.partC.warehouseDate.y,
+    VENDOR_FORM_COORDS.partC.warehouseDate.x,
+    VENDOR_FORM_COORDS.partC.warehouseDate.y,
     formatDateTime(partC?.warehouse_signed_at ?? null)
   );
 
