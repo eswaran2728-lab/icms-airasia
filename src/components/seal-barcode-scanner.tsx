@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { readBarcodes, setZXingModuleOverrides } from "zxing-wasm/reader";
 import { Button } from "@/components/ui/button";
-import { ZoomIn, ZoomOut, X, Lightbulb } from "lucide-react";
+import { ZoomIn, ZoomOut, X, Lightbulb, Share2 } from "lucide-react";
 
 // Self-host the ~1MB decoder .wasm from this app's own origin instead of
 // the package's default jsDelivr CDN fetch (public/wasm/zxing_reader.wasm,
@@ -45,7 +45,7 @@ const DECODE_INTERVAL_MS = 1000 / DECODE_FPS;
 // Bumped whenever this file changes meaningfully — shown on-screen so a
 // field report ("still doesn't work") can be checked against whether the
 // device actually picked up the latest deploy before debugging further.
-const SCANNER_BUILD = "diag-7";
+const SCANNER_BUILD = "diag-8";
 
 /**
  * Live camera barcode scanner for physical seal tags.
@@ -303,6 +303,29 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
     }
   };
 
+  // Diagnostic: hands over the EXACT bytes fed to the decoder on the
+  // last crop pass, so a "still doesn't work" report can be verified
+  // against the real image instead of a screenshot's re-compression.
+  const shareDecoderImage = () => {
+    const canvas = previewCanvasRef.current;
+    if (!canvas) return;
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const file = new File([blob], "seal-decoder-input.png", { type: "image/png" });
+      const nav = navigator as Navigator & {
+        canShare?: (data: { files: File[] }) => boolean;
+        share?: (data: { files: File[]; title?: string }) => Promise<void>;
+      };
+      if (nav.canShare?.({ files: [file] }) && nav.share) {
+        nav.share({ files: [file], title: "Seal barcode decoder input" }).catch(() => undefined);
+        return;
+      }
+      // Share API (or file sharing) unsupported here — open it directly
+      // so it can be long-pressed and saved instead.
+      window.open(URL.createObjectURL(blob), "_blank");
+    }, "image/png");
+  };
+
   return (
     <div className="space-y-3 rounded-lg border bg-card p-3">
       <div className="flex items-center justify-between">
@@ -347,7 +370,21 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
           here and it still won't decode, that's a real bug worth
           reporting with a screenshot of this box. */}
       <div className="space-y-1">
-        <p className="text-center text-xs text-muted-foreground">What the decoder sees:</p>
+        <div className="flex items-center justify-center gap-2">
+          <p className="text-center text-xs text-muted-foreground">What the decoder sees:</p>
+          {attempts > 0 ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6"
+              aria-label="Save or share this exact image"
+              onClick={shareDecoderImage}
+            >
+              <Share2 className="h-3.5 w-3.5" />
+            </Button>
+          ) : null}
+        </div>
         <canvas
           ref={previewCanvasRef}
           className="mx-auto block w-full max-w-xs rounded-md border bg-black/90"
