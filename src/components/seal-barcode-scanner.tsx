@@ -41,7 +41,7 @@ const DECODE_INTERVAL_MS = 1000 / DECODE_FPS;
 // Bumped whenever this file changes meaningfully — shown on-screen so a
 // field report ("still doesn't work") can be checked against whether the
 // device actually picked up the latest deploy before debugging further.
-const SCANNER_BUILD = "diag-10";
+const SCANNER_BUILD = "diag-11";
 
 /**
  * Live camera barcode scanner for physical seal tags.
@@ -112,6 +112,19 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
   // truth (what it read, which format, why it was rejected) instead of
   // a photo of unknown provenance.
   const [lastCandidate, setLastCandidate] = useState<string>("");
+  // Aggregate, not last-tick-only: the full-frame and crop passes
+  // alternate at ~3/sec each, so a single tick's outcome (what
+  // lastCandidate shows) is one noisy sample, not evidence about the
+  // whole session — a screenshot timed to a blank/miss tick looks
+  // identical to a session where nothing ever worked. These counters
+  // separate the two passes so a systematic problem in one specific
+  // pass (e.g. a framing bug that only affects the crop) is visible
+  // instead of averaged away.
+  const statsRef = useRef({
+    full: { attempts: 0, anyCandidate: 0, valid: 0 },
+    crop: { attempts: 0, anyCandidate: 0, valid: 0 },
+  });
+  const [statsText, setStatsText] = useState("");
 
   useEffect(() => {
     activeRef.current = true;
@@ -122,6 +135,11 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
     setDecoderStatus("loading");
     setAttempts(0);
     setLastCandidate("");
+    statsRef.current = {
+      full: { attempts: 0, anyCandidate: 0, valid: 0 },
+      crop: { attempts: 0, anyCandidate: 0, valid: 0 },
+    };
+    setStatsText("");
 
     const previewCanvas = previewCanvasRef.current;
     const previewCtx = previewCanvas?.getContext("2d", { willReadFrequently: true }) ?? null;
@@ -173,8 +191,8 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
 
         // Alternate full-frame and upscaled-crop passes — see the class
         // comment for why neither alone is sufficient.
-        const image =
-          passRef.current % 2 === 1 ? captureFullFrame(video) : captureCrop(video);
+        const passKind = passRef.current % 2 === 1 ? "full" : "crop";
+        const image = passKind === "full" ? captureFullFrame(video) : captureCrop(video);
 
         if (image) {
           try {
@@ -195,16 +213,25 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
             setDecoderStatus("ready");
             setAttempts((n) => n + 1);
 
+            const s = statsRef.current[passKind];
+            s.attempts += 1;
             const best = results[0];
             if (best) {
+              s.anyCandidate += 1;
+              if (best.isValid) s.valid += 1;
               setLastCandidate(
-                `${best.format} "${best.text || "(empty)"}" valid=${best.isValid}${
+                `[${passKind}] ${best.format} "${best.text || "(empty)"}" valid=${best.isValid}${
                   best.error ? ` err="${best.error}"` : ""
                 }`
               );
             } else {
-              setLastCandidate("(no candidate this frame)");
+              setLastCandidate(`[${passKind}] (no candidate this frame)`);
             }
+            const f = statsRef.current.full;
+            const c = statsRef.current.crop;
+            setStatsText(
+              `full ${f.attempts}att/${f.anyCandidate}cand/${f.valid}valid · crop ${c.attempts}att/${c.anyCandidate}cand/${c.valid}valid`
+            );
 
             // returnErrors:true (above) surfaces checksum-failed reads
             // instead of silently dropping them — necessary to diagnose
@@ -389,6 +416,11 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
       {lastCandidate ? (
         <p className="text-center font-mono text-[11px] leading-snug text-amber-700 dark:text-amber-400">
           {lastCandidate}
+        </p>
+      ) : null}
+      {statsText ? (
+        <p className="text-center font-mono text-[11px] leading-snug text-muted-foreground">
+          {statsText}
         </p>
       ) : null}
 
