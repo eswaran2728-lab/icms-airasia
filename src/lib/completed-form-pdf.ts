@@ -1,403 +1,421 @@
 import "server-only";
 
-import { jsPDF } from "jspdf";
-import autoTable from "jspdf-autotable";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { signedUrl, uploadPdfBuffer } from "@/lib/storage";
-import { stepsFor, type CheckpointPart } from "@/lib/workflow";
-import {
-  CARGO_TYPE_LABELS,
-  DELIVERY_LOCATION_LABELS,
-  DIRECTION_LABELS,
-  HUB_DESTINATION_LABELS,
-} from "@/lib/constants";
 import { formatDateTime } from "@/lib/utils";
+import { loadOfficialTemplate, drawValue, drawWrapped, drawSignature, markSelected, markCargoTick } from "@/lib/pdf-overlay";
+import type { OfficialFormKind } from "@/lib/pdf-templates";
 import type {
-  CateringCompany,
+  CargoType,
   PartA,
   PartBC,
   PartD,
-  PartHub,
-  PartRedq,
   Seal,
   SealVerification,
   Transaction,
 } from "@/lib/database.types";
 
-async function signatureDataUrl(path: string | null): Promise<string | null> {
+async function signatureBytes(path: string | null): Promise<Buffer | null> {
   const url = await signedUrl("signatures", path);
   if (!url) return null;
   try {
     const res = await fetch(url);
     if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    return `data:image/png;base64,${buf.toString("base64")}`;
+    return Buffer.from(await res.arrayBuffer());
   } catch {
     return null;
   }
 }
 
-function sealVerificationLines(
-  checkpoint: "INFLIGHT_POST" | "AIRPORT_POST" | "PART_D" | "REDQ",
-  verifications: SealVerification[]
-): string[] {
+/**
+ * Entered seal number(s) an officer recorded at a given checkpoint, per
+ * the seal_verifications table — this is what the official form's single
+ * "OUTBOUND SEAL SERIAL NO" line at that checkpoint should show (what was
+ * physically read there), not necessarily the Part A record.
+ */
+function sealNumbersAt(checkpoint: "INFLIGHT_POST" | "AIRPORT_POST" | "PART_D", verifications: SealVerification[]): string {
   return verifications
     .filter((v) => v.checkpoint === checkpoint)
-    .map(
-      (v) =>
-        `${v.entered_seal_number} (${v.observed_seal_color ?? "—"}) — ${v.matched ? "Match" : "Mismatch"}`
-    );
+    .map((v) => v.entered_seal_number)
+    .join(", ");
 }
 
-function addSignatureBlock(
-  doc: jsPDF,
-  y: number,
-  label: string,
-  dataUrl: string | null
-): number {
-  doc.setFontSize(8);
-  doc.text(`${label} signature:`, 14, y);
-  if (dataUrl) {
-    try {
-      doc.addImage(dataUrl, "PNG", 14, y + 2, 45, 20);
-      return y + 26;
-    } catch {
-      return y + 6;
-    }
-  }
-  return y + 6;
+// ---------------------------------------------------------------------
+// Field coordinates on templates/forms/ifcsf/ifcsf-inbound-outbound.pdf
+// (PDF space, origin bottom-left) — extracted from the official file's
+// own text/label positions, one page per direction. Every value here is
+// "just after the printed label" or "on the printed blank line", not
+// invented layout.
+// ---------------------------------------------------------------------
+
+const CARGO_ROW_OUTBOUND: { type: CargoType; x: number; y: number }[] = [
+  { type: "FOOD_BEVERAGE", x: 80.5, y: 618.2 },
+  { type: "PERISHABLE", x: 197.9, y: 618.2 },
+  { type: "DUTY_FREE", x: 288.7, y: 618.2 },
+  { type: "MERCHANDISE", x: 369.8, y: 618.2 },
+  { type: "VEHICLE_MAINTENANCE", x: 458.6, y: 618.2 },
+];
+const CARGO_ROW_INBOUND: { type: CargoType; x: number; y: number }[] = [
+  { type: "FOOD_BEVERAGE", x: 80.5, y: 621.7 },
+  { type: "PERISHABLE", x: 197.9, y: 621.7 },
+  { type: "DUTY_FREE", x: 288.7, y: 621.7 },
+  { type: "MERCHANDISE", x: 369.8, y: 621.7 },
+  { type: "VEHICLE_MAINTENANCE", x: 458.6, y: 621.7 },
+];
+
+interface XY {
+  x: number;
+  y: number;
+}
+interface Box extends XY {
+  w: number;
+  h: number;
+}
+interface CheckpointCoords {
+  vehicleNo: XY;
+  sealNo: XY;
+  driverNameId: XY;
+  asoName: XY;
+  asoId: XY;
+  signature: Box;
+  dateTime: XY;
+}
+interface IfcsfCoords {
+  station: XY;
+  cargoRow: { type: CargoType; x: number; y: number }[];
+  partA: {
+    totalSupplies: XY;
+    carts: XY;
+    smu: XY;
+    pallets: XY;
+    boxes: XY;
+    ovenRacks: XY;
+    /** Only present on Inbound's Part A (FOB) — Outbound's Part A has no vehicle/seal field on the official form. */
+    vehicleNo: XY | null;
+    sealNo: XY | null;
+    name: XY;
+    idNo: XY;
+    signature: Box;
+    dateTime: XY;
+  };
+  partB: CheckpointCoords;
+  partC: CheckpointCoords;
+  /** Only present on Outbound — the Inbound page has no Part D. */
+  partD: {
+    sraOption: Box;
+    aircraftOption: Box;
+    asoName: XY;
+    asoId: XY;
+    signature: Box;
+    dateTime: XY;
+  } | null;
+  remarks: { x: number; yTop: number; maxWidth: number; maxLines: number; lineHeight: number };
 }
 
-/**
- * Builds the completed-form PDF for a finished transaction, mirroring the
- * amended IFCSF (AA/SEC/F/010 Rev.01) layout: header + cargo checklist +
- * supplies breakdown from Part A, then every checkpoint in the same order
- * the paper form covers for that direction/route (stepsFor() is the
- * single source of truth for that ordering — Part Hub/REDQ get their own
- * rendering branches since their record shape differs from PartBC/PartD).
- */
-function buildPdf(
-  transaction: Transaction & { catering_companies: Pick<CateringCompany, "name"> | null },
+const OUTBOUND_COORDS: IfcsfCoords = {
+  station: { x: 106, y: 646.5 },
+  cargoRow: CARGO_ROW_OUTBOUND,
+  partA: {
+    totalSupplies: { x: 230, y: 557.2 },
+    carts: { x: 108, y: 541.8 },
+    smu: { x: 190, y: 541.8 },
+    pallets: { x: 283, y: 541.8 },
+    boxes: { x: 378, y: 541.8 },
+    ovenRacks: { x: 478, y: 541.8 },
+    vehicleNo: null,
+    sealNo: null,
+    name: { x: 92, y: 515.2 },
+    idNo: { x: 352, y: 515.2 },
+    signature: { x: 118, y: 498.6, w: 55, h: 16 },
+    dateTime: { x: 372, y: 499.6 },
+  },
+  partB: {
+    vehicleNo: { x: 200, y: 419.9 },
+    sealNo: { x: 200, y: 399.7 },
+    driverNameId: { x: 196, y: 379.4 },
+    asoName: { x: 113, y: 358.0 },
+    asoId: { x: 352, y: 358.0 },
+    signature: { x: 118, y: 341.6, w: 55, h: 16 },
+    dateTime: { x: 378, y: 342.6 },
+  },
+  partC: {
+    vehicleNo: { x: 200, y: 262.9 },
+    sealNo: { x: 200, y: 241.8 },
+    driverNameId: { x: 196, y: 220.5 },
+    asoName: { x: 113, y: 201.1 },
+    asoId: { x: 352, y: 201.1 },
+    signature: { x: 118, y: 184.6, w: 55, h: 16 },
+    dateTime: { x: 378, y: 185.6 },
+  },
+  partD: {
+    sraOption: { x: 254.6, y: 145.4, w: 100, h: 11 },
+    aircraftOption: { x: 394.6, y: 145.4, w: 58, h: 11 },
+    asoName: { x: 113, y: 124.6 },
+    asoId: { x: 352, y: 124.6 },
+    signature: { x: 118, y: 108.0, w: 55, h: 16 },
+    dateTime: { x: 378, y: 109.0 },
+  },
+  remarks: { x: 58, yTop: 71, maxWidth: 495, maxLines: 3, lineHeight: 9 },
+};
+
+const INBOUND_COORDS: IfcsfCoords = {
+  station: { x: 106, y: 650 },
+  cargoRow: CARGO_ROW_INBOUND,
+  partA: {
+    totalSupplies: { x: 230, y: 555.8 },
+    carts: { x: 96, y: 540.3 },
+    smu: { x: 172, y: 540.3 },
+    pallets: { x: 274, y: 540.3 },
+    boxes: { x: 365, y: 540.3 },
+    ovenRacks: { x: 478, y: 540.3 },
+    vehicleNo: { x: 200, y: 509.7 },
+    sealNo: { x: 200, y: 489.2 },
+    name: { x: 92, y: 467.7 },
+    idNo: { x: 352, y: 467.7 },
+    signature: { x: 118, y: 450.6, w: 55, h: 16 },
+    dateTime: { x: 372, y: 452.1 },
+  },
+  partB: {
+    vehicleNo: { x: 200, y: 367.5 },
+    sealNo: { x: 200, y: 346.3 },
+    driverNameId: { x: 196, y: 325.1 },
+    asoName: { x: 113, y: 308.7 },
+    asoId: { x: 352, y: 308.7 },
+    signature: { x: 118, y: 292.2, w: 55, h: 16 },
+    dateTime: { x: 378, y: 293.2 },
+  },
+  partC: {
+    vehicleNo: { x: 200, y: 209.8 },
+    sealNo: { x: 200, y: 189.5 },
+    driverNameId: { x: 196, y: 169.3 },
+    asoName: { x: 113, y: 147.9 },
+    asoId: { x: 352, y: 147.9 },
+    signature: { x: 118, y: 131.4, w: 55, h: 16 },
+    dateTime: { x: 378, y: 132.4 },
+  },
+  partD: null,
+  remarks: { x: 58, yTop: 80.7, maxWidth: 495, maxLines: 3, lineHeight: 9 },
+};
+
+async function overlayIfcsf(
+  transaction: Transaction,
   partA: PartA | null,
-  parts: Partial<Record<CheckpointPart, PartBC | PartD | PartHub | PartRedq | null>>,
+  partB: PartBC | null,
+  partC: PartBC | null,
+  partD: PartD | null,
   seals: Seal[],
   verifications: SealVerification[],
-  signatures: Partial<Record<"part_a" | CheckpointPart, string | null>>
-): jsPDF {
-  const doc = new jsPDF();
-  doc.setFontSize(14);
-  doc.text("In-flight Catering Security Form (IFCSF)", 14, 16);
-  doc.setFontSize(9);
-  doc.text("AA/SEC/F/010 Rev. 01", 14, 22);
-  doc.text(
-    `Generated ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Kuala_Lumpur" })} (MYT)`,
-    14,
-    27
+  signatures: { part_a: Buffer | null; part_b: Buffer | null; part_c: Buffer | null; part_d: Buffer | null }
+): Promise<Uint8Array> {
+  const kind: OfficialFormKind = transaction.direction === "INBOUND" ? "INBOUND" : "OUTBOUND";
+  const { pdfDoc, page, font } = await loadOfficialTemplate(kind);
+  const C = kind === "INBOUND" ? INBOUND_COORDS : OUTBOUND_COORDS;
+
+  drawValue(page, font, C.station.x, C.station.y, transaction.station);
+
+  for (const cargo of C.cargoRow) {
+    if (transaction.cargo_types.includes(cargo.type)) markCargoTick(page, cargo.x, cargo.y);
+  }
+
+  // Part A — no vehicle/seal fields on Outbound's Part A (matches the
+  // official form); Inbound's Part A (FOB) has them.
+  const activeSealNumbers = seals
+    .filter((s) => !s.superseded_at)
+    .map((s) => s.seal_number)
+    .join(", ");
+  drawValue(page, font, C.partA.totalSupplies.x, C.partA.totalSupplies.y, transaction.supplies_total);
+  drawValue(page, font, C.partA.carts.x, C.partA.carts.y, transaction.supplies_carts);
+  drawValue(page, font, C.partA.smu.x, C.partA.smu.y, transaction.supplies_smu);
+  drawValue(page, font, C.partA.pallets.x, C.partA.pallets.y, transaction.supplies_pallets);
+  drawValue(page, font, C.partA.boxes.x, C.partA.boxes.y, transaction.supplies_boxes);
+  drawValue(page, font, C.partA.ovenRacks.x, C.partA.ovenRacks.y, transaction.supplies_oven_racks);
+  if (C.partA.vehicleNo && C.partA.sealNo) {
+    drawValue(page, font, C.partA.vehicleNo.x, C.partA.vehicleNo.y, transaction.vehicle_number);
+    drawValue(page, font, C.partA.sealNo.x, C.partA.sealNo.y, activeSealNumbers);
+  }
+  drawValue(page, font, C.partA.name.x, C.partA.name.y, partA?.pic_name, { maxWidth: 220 });
+  drawValue(page, font, C.partA.idNo.x, C.partA.idNo.y, partA?.pic_staff_id);
+  drawValue(page, font, C.partA.dateTime.x, C.partA.dateTime.y, formatDateTime(partA?.completed_at ?? null));
+  await drawSignature(
+    pdfDoc,
+    page,
+    signatures.part_a,
+    C.partA.signature.x,
+    C.partA.signature.y,
+    C.partA.signature.w,
+    C.partA.signature.h
   );
 
-  autoTable(doc, {
-    startY: 32,
-    head: [["Transaction", "Direction", "Route", "Station", "Vehicle", "Driver", "Status"]],
-    body: [
-      [
-        transaction.transaction_number,
-        DIRECTION_LABELS[transaction.direction],
-        transaction.route === "HUB" && transaction.hub_destination
-          ? `Hub — ${HUB_DESTINATION_LABELS[transaction.hub_destination]}`
-          : transaction.route === "REDQ"
-            ? "REDQ → FOB"
-            : "Aircraft",
-        transaction.station ?? "—",
-        transaction.vehicle_number,
-        `${transaction.driver_name} (${transaction.driver_id})`,
-        transaction.part_d_skipped ? "Completed — Part D skipped" : "Completed",
-      ],
-    ],
-    styles: { fontSize: 8 },
-    headStyles: { fillColor: [238, 46, 36] },
-  });
-
-  const cargoLine =
-    transaction.cargo_types.length > 0
-      ? transaction.cargo_types.map((c) => CARGO_TYPE_LABELS[c]).join(", ")
-      : "—";
-  let y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 6;
-  doc.setFontSize(9);
-  doc.text(`Cargo Type: ${cargoLine}`, 14, y);
-  y += 8;
-
-  // Part A — supplies breakdown + certifying PIC.
-  doc.setFontSize(11);
-  doc.text("PART A — Warehouse / FOB", 14, y);
-  y += 4;
-  autoTable(doc, {
-    startY: y,
-    head: [["Total Supplies", "Carts", "SMU", "Pallets", "Boxes", "Oven Rack"]],
-    body: [
-      [
-        transaction.supplies_total ?? "—",
-        transaction.supplies_carts ?? "—",
-        transaction.supplies_smu ?? "—",
-        transaction.supplies_pallets ?? "—",
-        transaction.supplies_boxes ?? "—",
-        transaction.supplies_oven_racks ?? "—",
-      ].map(String),
-    ],
-    styles: { fontSize: 8 },
-    headStyles: { fillColor: [212, 175, 55] },
-  });
-  y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 4;
-
-  const sealsBody =
-    seals.length > 0
-      ? seals.map((s) => [
-          s.seal_number,
-          s.seal_type,
-          s.seal_color,
-          s.superseded_at ? `Superseded ${formatDateTime(s.superseded_at)}` : "Active",
-        ])
-      : [["—", "—", "—", "—"]];
-  autoTable(doc, {
-    startY: y,
-    head: [["Seal Number", "Type", "Colour Applied", "Status"]],
-    body: sealsBody,
-    styles: { fontSize: 8 },
-    headStyles: { fillColor: [212, 175, 55] },
-  });
-  y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 4;
-
-  doc.setFontSize(8);
-  doc.text(
-    `Name: ${partA?.pic_name ?? "—"}    ID No: ${partA?.pic_staff_id ?? "—"}    Date/Time: ${formatDateTime(partA?.completed_at ?? null)}`,
-    14,
-    y
+  const partBCheckpoint = "INFLIGHT_POST" as const;
+  drawValue(page, font, C.partB.vehicleNo.x, C.partB.vehicleNo.y, partB?.observed_vehicle_number);
+  drawValue(
+    page,
+    font,
+    C.partB.sealNo.x,
+    C.partB.sealNo.y,
+    sealNumbersAt(partBCheckpoint, verifications) || activeSealNumbers
   );
-  y += 4;
-  if (transaction.escort_officer_name) {
-    doc.text(
-      `Escort Officer: ${transaction.escort_officer_name} (${transaction.escort_officer_staff_id ?? "—"})    Escort Vehicle: ${transaction.escort_vehicle_number ?? "—"}`,
-      14,
-      y
+  drawValue(
+    page,
+    font,
+    C.partB.driverNameId.x,
+    C.partB.driverNameId.y,
+    partB ? `${partB.observed_driver_name ?? "—"} / ${partB.observed_driver_id ?? "—"}` : null,
+    { maxWidth: 280 }
+  );
+  drawValue(page, font, C.partB.asoName.x, C.partB.asoName.y, partB?.avsec_name, { maxWidth: 200 });
+  drawValue(page, font, C.partB.asoId.x, C.partB.asoId.y, partB?.avsec_staff_id);
+  drawValue(
+    page,
+    font,
+    C.partB.dateTime.x,
+    C.partB.dateTime.y,
+    partB ? `${partB.checkpoint_date} ${partB.checkpoint_time}` : null
+  );
+  await drawSignature(
+    pdfDoc,
+    page,
+    signatures.part_b,
+    C.partB.signature.x,
+    C.partB.signature.y,
+    C.partB.signature.w,
+    C.partB.signature.h
+  );
+
+  const partCCheckpoint = "AIRPORT_POST" as const;
+  drawValue(page, font, C.partC.vehicleNo.x, C.partC.vehicleNo.y, partC?.observed_vehicle_number);
+  drawValue(
+    page,
+    font,
+    C.partC.sealNo.x,
+    C.partC.sealNo.y,
+    sealNumbersAt(partCCheckpoint, verifications) || activeSealNumbers
+  );
+  drawValue(
+    page,
+    font,
+    C.partC.driverNameId.x,
+    C.partC.driverNameId.y,
+    partC ? `${partC.observed_driver_name ?? "—"} / ${partC.observed_driver_id ?? "—"}` : null,
+    { maxWidth: 280 }
+  );
+  drawValue(page, font, C.partC.asoName.x, C.partC.asoName.y, partC?.avsec_name, { maxWidth: 200 });
+  drawValue(page, font, C.partC.asoId.x, C.partC.asoId.y, partC?.avsec_staff_id);
+  drawValue(
+    page,
+    font,
+    C.partC.dateTime.x,
+    C.partC.dateTime.y,
+    partC ? `${partC.checkpoint_date} ${partC.checkpoint_time}` : null
+  );
+  await drawSignature(
+    pdfDoc,
+    page,
+    signatures.part_c,
+    C.partC.signature.x,
+    C.partC.signature.y,
+    C.partC.signature.w,
+    C.partC.signature.h
+  );
+
+  // Part D — Outbound only; the Inbound page has no Part D at all.
+  if (C.partD) {
+    const D = C.partD;
+    if (partD) {
+      const opt = partD.delivery_location === "SRA_WAREHOUSE" ? D.sraOption : D.aircraftOption;
+      markSelected(page, opt.x, opt.y, opt.w, opt.h);
+    }
+    drawValue(page, font, D.asoName.x, D.asoName.y, partD?.receiver_name, { maxWidth: 200 });
+    drawValue(page, font, D.asoId.x, D.asoId.y, partD?.receiver_staff_id);
+    drawValue(
+      page,
+      font,
+      D.dateTime.x,
+      D.dateTime.y,
+      partD ? `${partD.checkpoint_date} ${partD.checkpoint_time}` : null
     );
-    y += 4;
-  }
-  y = addSignatureBlock(doc, y, "PIC", signatures.part_a ?? null);
-  if (y > 250) {
-    doc.addPage();
-    y = 16;
+    await drawSignature(pdfDoc, page, signatures.part_d, D.signature.x, D.signature.y, D.signature.w, D.signature.h);
   }
 
-  // Every checkpoint in the direction/route's actual sequence — the same
-  // order the paper form uses. Section headings come straight from each
-  // step's own label, so Hub/REDQ headings never need special-casing.
-  stepsFor(transaction.direction, transaction.route).forEach((step) => {
-    if (y > 230) {
-      doc.addPage();
-      y = 16;
-    }
-    doc.setFontSize(11);
-    doc.text(step.label.toUpperCase(), 14, y);
-    y += 4;
-
-    if (step.part === "part_hub") {
-      const record = parts.part_hub as PartHub | null;
-      if (!record) {
-        doc.setFontSize(8);
-        doc.text("Not completed.", 14, y);
-        y += 8;
-        return;
-      }
-      const rows: [string, string][] = [
-        ["Confirmed Destination", HUB_DESTINATION_LABELS[record.confirmed_destination]],
-        ["Hub AVSEC", `${record.hub_avsec_name} (${record.hub_avsec_staff_id})`],
-        ["Date/Time", formatDateTime(record.completed_at)],
-      ];
-      if (record.remarks) rows.push(["Remarks", record.remarks]);
-      autoTable(doc, {
-        startY: y,
-        body: rows,
-        styles: { fontSize: 8 },
-        columnStyles: { 0: { fontStyle: "bold", cellWidth: 45 } },
-      });
-      y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 2;
-      y = addSignatureBlock(doc, y, "Hub AVSEC", signatures.part_hub ?? null);
-      return;
-    }
-
-    if (step.part === "part_redq") {
-      const record = parts.part_redq as PartRedq | null;
-      if (!record) {
-        doc.setFontSize(8);
-        doc.text("Not completed.", 14, y);
-        y += 8;
-        return;
-      }
-      // Full seal chain — both the closed-out old seal and the newly
-      // applied one, per the audit-trail requirement for this step.
-      const oldSeal = seals.find((s) => s.id === record.old_seal_id);
-      const newSeal = seals.find((s) => s.id === record.new_seal_id);
-      const rows: [string, string][] = [
-        [
-          "Old Seal (closed out)",
-          oldSeal
-            ? `${oldSeal.seal_number} (${oldSeal.seal_color}) — superseded ${formatDateTime(oldSeal.superseded_at)}`
-            : "—",
-        ],
-        ["New Seal (applied)", newSeal ? `${newSeal.seal_number} (${newSeal.seal_color})` : "—"],
-        ["REDQ AVSEC", `${record.redq_avsec_name} (${record.redq_avsec_staff_id})`],
-        ["Date/Time", formatDateTime(record.completed_at)],
-      ];
-      const sealLines = sealVerificationLines("REDQ", verifications);
-      if (sealLines.length > 0) rows.push(["Old Seal Verification", sealLines.join("; ")]);
-      if (record.remarks) rows.push(["Remarks", record.remarks]);
-      autoTable(doc, {
-        startY: y,
-        body: rows,
-        styles: { fontSize: 8 },
-        columnStyles: { 0: { fontStyle: "bold", cellWidth: 45 } },
-      });
-      y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 2;
-      y = addSignatureBlock(doc, y, "REDQ AVSEC", signatures.part_redq ?? null);
-      return;
-    }
-
-    const record = parts[step.part] as PartBC | PartD | null | undefined;
-    if (!record) {
-      doc.setFontSize(8);
-      doc.text(
-        step.part === "part_d" && transaction.part_d_skipped
-          ? `Skipped — ${transaction.part_d_skip_reason ?? "no reason recorded"}`
-          : "Not completed.",
-        14,
-        y
-      );
-      y += 8;
-      return;
-    }
-
-    const isPartD = step.part === "part_d";
-    const officerName = isPartD ? (record as PartD).receiver_name : (record as PartBC).avsec_name;
-    const officerId = isPartD
-      ? (record as PartD).receiver_staff_id
-      : (record as PartBC).avsec_staff_id;
-    const rows: [string, string][] = isPartD
-      ? [
-          ["Delivery Location", DELIVERY_LOCATION_LABELS[(record as PartD).delivery_location]],
-          ...((record as PartD).aircraft_identifier
-            ? ([["Aircraft Identifier", (record as PartD).aircraft_identifier as string]] as [
-                string,
-                string,
-              ][])
-            : []),
-        ]
-      : [
-          ["Vehicle Reg. No", (record as PartBC).observed_vehicle_number ?? "—"],
-          [
-            "Driver Name & ID",
-            `${(record as PartBC).observed_driver_name ?? "—"} / ${(record as PartBC).observed_driver_id ?? "—"}`,
-          ],
-        ];
-    rows.push(["ASO Name", officerName], ["ASO ID No", officerId], ["Result", record.result]);
-    if (record.escalation_reason) rows.push(["Escalation Reason", record.escalation_reason]);
-    if (record.remarks) rows.push(["Remarks", record.remarks]);
-    rows.push([
-      "Date/Time",
-      `${record.checkpoint_date} ${record.checkpoint_time}`,
-    ]);
-
-    const checkpointKey =
-      step.part === "part_b" ? "INFLIGHT_POST" : step.part === "part_c" ? "AIRPORT_POST" : "PART_D";
-    const sealLines = sealVerificationLines(checkpointKey, verifications);
-    if (sealLines.length > 0) rows.push(["Seal Verification", sealLines.join("; ")]);
-
-    autoTable(doc, {
-      startY: y,
-      body: rows,
-      styles: { fontSize: 8 },
-      columnStyles: { 0: { fontStyle: "bold", cellWidth: 45 } },
+  // Single remarks block on the physical form — combine whichever
+  // checkpoints recorded one (real stored text only, nothing invented).
+  const remarkParts = [
+    partB?.remarks ? `Part B: ${partB.remarks}` : null,
+    partC?.remarks ? `Part C: ${partC.remarks}` : null,
+    partD?.remarks ? `Part D: ${partD.remarks}` : null,
+  ].filter((r): r is string => !!r);
+  if (remarkParts.length > 0) {
+    drawWrapped(page, font, C.remarks.x, C.remarks.yTop, remarkParts.join("  "), {
+      maxWidth: C.remarks.maxWidth,
+      maxLines: C.remarks.maxLines,
+      lineHeight: C.remarks.lineHeight,
     });
-    y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 2;
-    y = addSignatureBlock(doc, y, "ASO", signatures[step.part] ?? null);
-  });
+  }
 
-  return doc;
+  return pdfDoc.save();
 }
 
 /**
  * Auto-runs right after a transaction reaches COMPLETED (Part D pass, Part
- * D skip, Part Hub, or the inbound final Part B) so the finished
- * IFCSF-style record exists for the admin to pull up without anyone
- * opening the transaction page first. Best-effort: a PDF failure never
- * blocks the checkpoint that just completed — it's an audit artifact, not
- * part of the workflow gate.
+ * D skip, Part Hub, or the inbound final Part B) so the finished official
+ * IFCSF form exists for the admin to pull up without anyone opening the
+ * transaction page first. Best-effort: a PDF failure never blocks the
+ * checkpoint that just completed — it's an audit artifact, not part of
+ * the workflow gate.
+ *
+ * Overlays ICMS transaction data onto the actual official IFCSF PDF
+ * (templates/forms/ifcsf/ifcsf-inbound-outbound.pdf — Outbound page 1,
+ * Inbound page 2) rather than generating a custom layout. HUB/REDQ-route
+ * transactions are OUTBOUND at the direction level and use the same
+ * Outbound page; those routes' own steps (Part Hub / Part REDQ) have no
+ * counterpart on the official paper form (it predates that workflow
+ * extension), so only the fields that exist on the form are filled —
+ * Part C/Part D simply stay blank for those routes, same as any other
+ * "not completed" field.
  */
 export async function generateCompletedFormPdf(transactionId: string): Promise<void> {
   try {
     const supabase = await createClient();
-    const { data: txRow } = await supabase
-      .from("transactions")
-      .select("*, catering_companies(name)")
-      .eq("id", transactionId)
-      .single();
+    const { data: txRow } = await supabase.from("transactions").select("*").eq("id", transactionId).single();
     if (!txRow) return;
-    const transaction = txRow as unknown as Transaction & {
-      catering_companies: Pick<CateringCompany, "name"> | null;
-    };
+    const transaction = txRow as Transaction;
     if (transaction.status !== "COMPLETED") return;
 
-    const [partARes, partBRes, partCRes, partDRes, partHubRes, partRedqRes, sealsRes] =
-      await Promise.all([
-        supabase.from("part_a").select("*").eq("transaction_id", transactionId).maybeSingle(),
-        supabase.from("part_b").select("*").eq("transaction_id", transactionId).maybeSingle(),
-        supabase.from("part_c").select("*").eq("transaction_id", transactionId).maybeSingle(),
-        supabase.from("part_d").select("*").eq("transaction_id", transactionId).maybeSingle(),
-        supabase.from("part_hub").select("*").eq("transaction_id", transactionId).maybeSingle(),
-        supabase.from("part_redq").select("*").eq("transaction_id", transactionId).maybeSingle(),
-        // No superseded_at filter — the PDF shows the full seal chain,
-        // including any seal a REDQ re-seal closed out.
-        supabase.from("seals").select("*").eq("transaction_id", transactionId),
-      ]);
+    const [partARes, partBRes, partCRes, partDRes, sealsRes] = await Promise.all([
+      supabase.from("part_a").select("*").eq("transaction_id", transactionId).maybeSingle(),
+      supabase.from("part_b").select("*").eq("transaction_id", transactionId).maybeSingle(),
+      supabase.from("part_c").select("*").eq("transaction_id", transactionId).maybeSingle(),
+      supabase.from("part_d").select("*").eq("transaction_id", transactionId).maybeSingle(),
+      supabase.from("seals").select("*").eq("transaction_id", transactionId),
+    ]);
     const partA = partARes.data as PartA | null;
     const partB = partBRes.data as PartBC | null;
     const partC = partCRes.data as PartBC | null;
     const partD = partDRes.data as PartD | null;
-    const partHub = partHubRes.data as PartHub | null;
-    const partRedq = partRedqRes.data as PartRedq | null;
     const seals = (sealsRes.data ?? []) as Seal[];
 
     const sealIds = seals.map((s) => s.id);
     const verifications = sealIds.length
-      ? ((await supabase.from("seal_verifications").select("*").in("seal_id", sealIds)).data as
+      ? (((await supabase.from("seal_verifications").select("*").in("seal_id", sealIds)).data as
           | SealVerification[]
-          | null) ?? []
+          | null) ?? [])
       : [];
 
-    const [sigA, sigB, sigC, sigD, sigHub, sigRedq] = await Promise.all([
-      signatureDataUrl(partA?.signature_url ?? null),
-      signatureDataUrl(partB?.signature_url ?? null),
-      signatureDataUrl(partC?.signature_url ?? null),
-      signatureDataUrl(partD?.signature_url ?? null),
-      signatureDataUrl(partHub?.signature_url ?? null),
-      signatureDataUrl(partRedq?.signature_url ?? null),
+    const [sigA, sigB, sigC, sigD] = await Promise.all([
+      signatureBytes(partA?.signature_url ?? null),
+      signatureBytes(partB?.signature_url ?? null),
+      signatureBytes(partC?.signature_url ?? null),
+      signatureBytes(partD?.signature_url ?? null),
     ]);
 
-    const doc = buildPdf(
-      transaction,
-      partA,
-      { part_b: partB, part_c: partC, part_d: partD, part_hub: partHub, part_redq: partRedq },
-      seals,
-      verifications,
-      {
-        part_a: sigA,
-        part_b: sigB,
-        part_c: sigC,
-        part_d: sigD,
-        part_hub: sigHub,
-        part_redq: sigRedq,
-      }
-    );
-    const bytes = Buffer.from(doc.output("arraybuffer"));
+    const pdfBytes = await overlayIfcsf(transaction, partA, partB, partC, partD, seals, verifications, {
+      part_a: sigA,
+      part_b: sigB,
+      part_c: sigC,
+      part_d: sigD,
+    });
+    const bytes = Buffer.from(pdfBytes);
 
     const path = await uploadPdfBuffer("completed-forms", bytes, transaction.transaction_number);
 

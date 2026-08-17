@@ -1,180 +1,160 @@
 import "server-only";
 
-import { jsPDF } from "jspdf";
-import autoTable from "jspdf-autotable";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { signedUrl, uploadPdfBuffer } from "@/lib/storage";
+import { formatDateTime } from "@/lib/utils";
+import { loadOfficialTemplate, drawValue, drawWrapped, drawSignature } from "@/lib/pdf-overlay";
 import type { VendorPartA, VendorPartB, VendorPartC, VendorTransaction } from "@/lib/database.types";
 
-async function signatureDataUrl(path: string | null): Promise<string | null> {
+async function signatureBytes(path: string | null): Promise<Buffer | null> {
   const url = await signedUrl("signatures", path);
   if (!url) return null;
   try {
     const res = await fetch(url);
     if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    return `data:image/png;base64,${buf.toString("base64")}`;
+    return Buffer.from(await res.arrayBuffer());
   } catch {
     return null;
   }
 }
 
-function addSignatureBlock(doc: jsPDF, y: number, label: string, dataUrl: string | null): number {
-  doc.setFontSize(8);
-  doc.text(`${label} signature:`, 14, y);
-  if (dataUrl) {
-    try {
-      doc.addImage(dataUrl, "PNG", 14, y + 2, 45, 20);
-      return y + 26;
-    } catch {
-      return y + 6;
-    }
-  }
-  return y + 6;
-}
+// ---------------------------------------------------------------------
+// Field coordinates on templates/forms/vendor/vendor-supplies-security-
+// form.pdf (PDF space, origin bottom-left) — extracted from the official
+// file's own printed blank-line positions.
+// ---------------------------------------------------------------------
+const COORDS = {
+  partA: {
+    driverName: { x: 264, y: 581.2 },
+    nric: { x: 264, y: 566.3 },
+    sealNo: { x: 264, y: 551.1 },
+    signature: { x: 102, y: 526.3, w: 70, h: 20 },
+    dateTime: { x: 102, y: 491.9 },
+  },
+  partB: {
+    vehicleNo: { x: 264, y: 413.6 },
+    driverNameNric: { x: 264, y: 397.0 },
+    sealNo: { x: 264, y: 380.9 },
+    remarks: { x: 263, yTop: 365.8, maxWidth: 290, maxLines: 2, lineHeight: 12 },
+    signature: { x: 102, y: 324.8, w: 70, h: 20 },
+    dateTime: { x: 102, y: 301.9 },
+  },
+  partC: {
+    vendorSignature: { x: 102, y: 169.9, w: 75, h: 22 },
+    warehouseSignature: { x: 348, y: 169.9, w: 75, h: 22 },
+    vendorName: { x: 102, y: 135.5 },
+    warehouseName: { x: 348, y: 135.5 },
+    vendorDate: { x: 102, y: 106.8 },
+    warehouseDate: { x: 348, y: 106.8 },
+  },
+} as const;
 
-/**
- * Builds the completed-form PDF for a finished vendor transaction,
- * mirroring the AA/SEC/F/019 "Vendors Supplies Security Form" layout:
- * Part A (Vendor), Part B (AirAsia Security), Part C (Warehouse — dual
- * certification, both signatures side by side).
- */
-function buildPdf(
-  transaction: VendorTransaction,
+async function overlayVendorForm(
   partA: VendorPartA | null,
   partB: VendorPartB | null,
   partC: VendorPartC | null,
-  signatures: { part_a: string | null; part_b: string | null; warehouse: string | null; vendor: string | null }
-): jsPDF {
-  const doc = new jsPDF();
-  doc.setFontSize(14);
-  doc.text("Vendors Supplies Security Form", 14, 16);
-  doc.setFontSize(9);
-  doc.text("AA/SEC/F/019 Rev. 01", 14, 22);
-  doc.text(
-    `Generated ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Kuala_Lumpur" })} (MYT)`,
-    14,
-    27
+  signatures: { part_a: Buffer | null; part_b: Buffer | null; warehouse: Buffer | null; vendor: Buffer | null }
+): Promise<Uint8Array> {
+  const { pdfDoc, page, font } = await loadOfficialTemplate("VENDOR");
+
+  // Part A (Vendor).
+  drawValue(page, font, COORDS.partA.driverName.x, COORDS.partA.driverName.y, partA?.driver_name, { maxWidth: 280 });
+  drawValue(page, font, COORDS.partA.nric.x, COORDS.partA.nric.y, partA?.nric_number);
+  drawValue(page, font, COORDS.partA.sealNo.x, COORDS.partA.sealNo.y, partA?.seal_number);
+  drawValue(
+    page,
+    font,
+    COORDS.partA.dateTime.x,
+    COORDS.partA.dateTime.y,
+    formatDateTime(partA?.completed_at ?? null)
+  );
+  await drawSignature(
+    pdfDoc,
+    page,
+    signatures.part_a,
+    COORDS.partA.signature.x,
+    COORDS.partA.signature.y,
+    COORDS.partA.signature.w,
+    COORDS.partA.signature.h
   );
 
-  autoTable(doc, {
-    startY: 32,
-    head: [["Transaction", "Status"]],
-    body: [[transaction.transaction_number, "Completed"]],
-    styles: { fontSize: 8 },
-    headStyles: { fillColor: [238, 46, 36] },
-  });
-
-  let y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 6;
-
-  // Part A — Vendor.
-  doc.setFontSize(11);
-  doc.text("PART A — VENDOR", 14, y);
-  y += 4;
-  autoTable(doc, {
-    startY: y,
-    body: [
-      ["Driver Name", partA?.driver_name ?? "—"],
-      ["NRIC Number", partA?.nric_number ?? "—"],
-      ["Seal Number", partA?.seal_number ?? "—"],
-      ["Date/Time", partA ? new Date(partA.completed_at).toLocaleString("en-GB", { timeZone: "Asia/Kuala_Lumpur" }) : "—"],
-    ],
-    styles: { fontSize: 8 },
-    columnStyles: { 0: { fontStyle: "bold", cellWidth: 45 } },
-  });
-  y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 2;
-  y = addSignatureBlock(doc, y, "Vendor Driver", signatures.part_a);
-  if (y > 250) {
-    doc.addPage();
-    y = 16;
-  }
-
-  // Part B — AirAsia Security.
-  doc.setFontSize(11);
-  doc.text("PART B — AIRASIA SECURITY (POST 2)", 14, y);
-  y += 4;
-  if (!partB) {
-    doc.setFontSize(8);
-    doc.text("Not completed.", 14, y);
-    y += 8;
-  } else {
-    autoTable(doc, {
-      startY: y,
-      body: [
-        ["Vehicle Reg. No", partB.vehicle_registration_no],
-        ["Driver Name & NRIC", `${partB.driver_name} / ${partB.driver_nric}`],
-        ["Seal Number", partB.seal_number],
-        ["ASO Name", partB.avsec_name],
-        ["ASO ID No", partB.avsec_staff_id],
-        ...(partB.remarks ? [["Remarks", partB.remarks]] : []),
-        ["Date/Time", new Date(partB.completed_at).toLocaleString("en-GB", { timeZone: "Asia/Kuala_Lumpur" })],
-      ] as [string, string][],
-      styles: { fontSize: 8 },
-      columnStyles: { 0: { fontStyle: "bold", cellWidth: 45 } },
-    });
-    y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 2;
-    y = addSignatureBlock(doc, y, "ASO", signatures.part_b);
-  }
-  if (y > 220) {
-    doc.addPage();
-    y = 16;
-  }
-
-  // Part C — Warehouse (In-Flight), dual certification.
-  doc.setFontSize(11);
-  doc.text("PART C — WAREHOUSE (IN-FLIGHT), DUAL CERTIFICATION", 14, y);
-  y += 4;
-  doc.setFontSize(7);
-  doc.text(
-    "I hereby declare that the information given above is true and accurate to the best of my knowledge.",
-    14,
-    y
+  // Part B (AirAsia Security).
+  drawValue(page, font, COORDS.partB.vehicleNo.x, COORDS.partB.vehicleNo.y, partB?.vehicle_registration_no);
+  drawValue(
+    page,
+    font,
+    COORDS.partB.driverNameNric.x,
+    COORDS.partB.driverNameNric.y,
+    partB ? `${partB.driver_name} / ${partB.driver_nric}` : null,
+    { maxWidth: 280 }
   );
-  y += 5;
-  if (!partC) {
-    doc.setFontSize(8);
-    doc.text("Not completed.", 14, y);
-    y += 8;
-  } else {
-    autoTable(doc, {
-      startY: y,
-      body: [
-        ["Warehouse PIC", partC.warehouse_pic_name ?? "—"],
-        [
-          "Warehouse Signed At",
-          partC.warehouse_signed_at
-            ? new Date(partC.warehouse_signed_at).toLocaleString("en-GB", { timeZone: "Asia/Kuala_Lumpur" })
-            : "—",
-        ],
-        ["Vendor Driver", partC.vendor_driver_name ?? "—"],
-        [
-          "Vendor Signed At",
-          partC.vendor_signed_at
-            ? new Date(partC.vendor_signed_at).toLocaleString("en-GB", { timeZone: "Asia/Kuala_Lumpur" })
-            : "—",
-        ],
-      ],
-      styles: { fontSize: 8 },
-      columnStyles: { 0: { fontStyle: "bold", cellWidth: 45 } },
-    });
-    y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 2;
-    const warehouseEndY = addSignatureBlock(doc, y, "Warehouse PIC", signatures.warehouse);
-    // Vendor signature block placed alongside, in the second half of the
-    // page width, so both certifications read side by side per the form.
-    doc.setFontSize(8);
-    doc.text("Vendor Driver signature:", 110, y);
-    if (signatures.vendor) {
-      try {
-        doc.addImage(signatures.vendor, "PNG", 110, y + 2, 45, 20);
-      } catch {
-        // signature image failed to embed; text label above still shows
-      }
-    }
-    y = Math.max(warehouseEndY, y + 26);
-  }
+  drawValue(page, font, COORDS.partB.sealNo.x, COORDS.partB.sealNo.y, partB?.seal_number);
+  drawWrapped(page, font, COORDS.partB.remarks.x, COORDS.partB.remarks.yTop, partB?.remarks, {
+    maxWidth: COORDS.partB.remarks.maxWidth,
+    maxLines: COORDS.partB.remarks.maxLines,
+    lineHeight: COORDS.partB.remarks.lineHeight,
+  });
+  drawValue(
+    page,
+    font,
+    COORDS.partB.dateTime.x,
+    COORDS.partB.dateTime.y,
+    formatDateTime(partB?.completed_at ?? null)
+  );
+  await drawSignature(
+    pdfDoc,
+    page,
+    signatures.part_b,
+    COORDS.partB.signature.x,
+    COORDS.partB.signature.y,
+    COORDS.partB.signature.w,
+    COORDS.partB.signature.h
+  );
 
-  return doc;
+  // Part C (Warehouse — In-Flight), dual certification: left column is
+  // Vendor Driver, right column is In-Flight Supervisor, per the
+  // template's own column headers.
+  await drawSignature(
+    pdfDoc,
+    page,
+    signatures.vendor,
+    COORDS.partC.vendorSignature.x,
+    COORDS.partC.vendorSignature.y,
+    COORDS.partC.vendorSignature.w,
+    COORDS.partC.vendorSignature.h
+  );
+  await drawSignature(
+    pdfDoc,
+    page,
+    signatures.warehouse,
+    COORDS.partC.warehouseSignature.x,
+    COORDS.partC.warehouseSignature.y,
+    COORDS.partC.warehouseSignature.w,
+    COORDS.partC.warehouseSignature.h
+  );
+  drawValue(page, font, COORDS.partC.vendorName.x, COORDS.partC.vendorName.y, partC?.vendor_driver_name, {
+    maxWidth: 220,
+  });
+  drawValue(page, font, COORDS.partC.warehouseName.x, COORDS.partC.warehouseName.y, partC?.warehouse_pic_name, {
+    maxWidth: 220,
+  });
+  drawValue(
+    page,
+    font,
+    COORDS.partC.vendorDate.x,
+    COORDS.partC.vendorDate.y,
+    formatDateTime(partC?.vendor_signed_at ?? null)
+  );
+  drawValue(
+    page,
+    font,
+    COORDS.partC.warehouseDate.x,
+    COORDS.partC.warehouseDate.y,
+    formatDateTime(partC?.warehouse_signed_at ?? null)
+  );
+
+  return pdfDoc.save();
 }
 
 /**
@@ -182,7 +162,9 @@ function buildPdf(
  * C signatures captured). Best-effort: a PDF failure never blocks the
  * checkpoint that just completed — it's an audit artifact, not part of
  * the workflow gate. Mirrors generateCompletedFormPdf() in
- * completed-form-pdf.ts.
+ * completed-form-pdf.ts: overlays ICMS data onto the actual official
+ * AA/SEC/F/019 "Vendors Supplies Security Form" PDF rather than
+ * generating a custom layout.
  */
 export async function generateVendorCompletedFormPdf(transactionId: string): Promise<void> {
   try {
@@ -206,19 +188,19 @@ export async function generateVendorCompletedFormPdf(transactionId: string): Pro
     const partC = partCRes.data as VendorPartC | null;
 
     const [sigA, sigB, sigWarehouse, sigVendor] = await Promise.all([
-      signatureDataUrl(partA?.signature_url ?? null),
-      signatureDataUrl(partB?.signature_url ?? null),
-      signatureDataUrl(partC?.warehouse_signature_url ?? null),
-      signatureDataUrl(partC?.vendor_signature_url ?? null),
+      signatureBytes(partA?.signature_url ?? null),
+      signatureBytes(partB?.signature_url ?? null),
+      signatureBytes(partC?.warehouse_signature_url ?? null),
+      signatureBytes(partC?.vendor_signature_url ?? null),
     ]);
 
-    const doc = buildPdf(transaction, partA, partB, partC, {
+    const pdfBytes = await overlayVendorForm(partA, partB, partC, {
       part_a: sigA,
       part_b: sigB,
       warehouse: sigWarehouse,
       vendor: sigVendor,
     });
-    const bytes = Buffer.from(doc.output("arraybuffer"));
+    const bytes = Buffer.from(pdfBytes);
 
     const path = await uploadPdfBuffer("completed-forms", bytes, transaction.transaction_number);
 
