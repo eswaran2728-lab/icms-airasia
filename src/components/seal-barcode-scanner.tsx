@@ -45,7 +45,7 @@ const DECODE_INTERVAL_MS = 1000 / DECODE_FPS;
 // Bumped whenever this file changes meaningfully — shown on-screen so a
 // field report ("still doesn't work") can be checked against whether the
 // device actually picked up the latest deploy before debugging further.
-const SCANNER_BUILD = "diag-3";
+const SCANNER_BUILD = "diag-4";
 
 /**
  * Live camera barcode scanner for physical seal tags.
@@ -112,12 +112,11 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
       // printed in an unexpected symbology should still scan.
       formats: ["any"],
     });
-    if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
     const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const ctx = canvas?.getContext("2d", { willReadFrequently: true }) ?? null;
 
     const drawUpscaledCrop = (video: HTMLVideoElement): HTMLCanvasElement | null => {
-      if (!ctx) return null;
+      if (!ctx || !canvas) return null;
       const sx = Math.round(video.videoWidth * CROP_LEFT_PCT);
       const sy = Math.round(video.videoHeight * CROP_TOP_PCT);
       const sw = Math.round(video.videoWidth * CROP_WIDTH_PCT);
@@ -302,6 +301,20 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
           {decoderStatus} · {attempts} frames{resolution ? ` · ${resolution}` : ""}
         </p>
       ) : null}
+
+      {/* Visible, not a debug artifact: this is the exact upscaled image
+          handed to the decoder on crop passes. If the bars look sharp
+          here and it still won't decode, that's a real bug worth
+          reporting with a screenshot of this box. If they look blurry
+          or smeared here, no decoder can read that — it's the shot, not
+          the code. */}
+      <div className="space-y-1">
+        <p className="text-center text-xs text-muted-foreground">What the decoder sees:</p>
+        <canvas
+          ref={canvasRef}
+          className="mx-auto block w-full max-w-xs rounded-md border bg-black/90"
+        />
+      </div>
 
       {zoomSupported || torchSupported ? (
         <div className="flex items-center justify-center gap-3">
