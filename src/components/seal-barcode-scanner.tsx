@@ -41,7 +41,7 @@ const DECODE_INTERVAL_MS = 1000 / DECODE_FPS;
 // Bumped whenever this file changes meaningfully — shown on-screen so a
 // field report ("still doesn't work") can be checked against whether the
 // device actually picked up the latest deploy before debugging further.
-const SCANNER_BUILD = "diag-13";
+const SCANNER_BUILD = "diag-14";
 
 /**
  * Live camera barcode scanner for physical seal tags.
@@ -277,6 +277,17 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
               // discarding them. See the class comment.
               returnErrors: true,
               textMode: "Plain",
+              // Default is 2 — the engine requires two independent scan
+              // lines through the barcode to agree before it accepts a
+              // detection at all (not a checksum step — this runs before
+              // that, at the geometry stage). A real handheld photo can
+              // have enough per-line noise (focus falloff, slight blur,
+              // low ink/background contrast) that no two lines agree
+              // exactly even when the barcode is genuinely legible.
+              // Lowering to 1 trades a little false-positive risk for a
+              // real chance at detecting it at all — safe here because
+              // the isValid checksum gate below still has the final say.
+              minLineCount: 1,
             });
             consecutiveErrorsRef.current = 0; // a clean resolve means the decoder is alive
             setDecoderStatus("ready");
