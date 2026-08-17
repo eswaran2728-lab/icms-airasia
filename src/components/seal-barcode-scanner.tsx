@@ -41,7 +41,7 @@ const DECODE_INTERVAL_MS = 1000 / DECODE_FPS;
 // Bumped whenever this file changes meaningfully — shown on-screen so a
 // field report ("still doesn't work") can be checked against whether the
 // device actually picked up the latest deploy before debugging further.
-const SCANNER_BUILD = "diag-9";
+const SCANNER_BUILD = "diag-10";
 
 /**
  * Live camera barcode scanner for physical seal tags.
@@ -102,6 +102,14 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
   const [decoderStatus, setDecoderStatus] = useState<"loading" | "ready" | "failed">("loading");
   const [attempts, setAttempts] = useState(0);
   const [resolution, setResolution] = useState("");
+  // Plain text, not an image — immune to every recompression step
+  // (Photos library, chat upload, screenshot-of-a-viewer) that turned
+  // out to be corrupting every image round-trip we tried. Shows the
+  // best candidate readBarcodes() found on the last decode tick, valid
+  // or not, so a report of "still not working" comes with exact ground
+  // truth (what it read, which format, why it was rejected) instead of
+  // a photo of unknown provenance.
+  const [lastCandidate, setLastCandidate] = useState<string>("");
 
   useEffect(() => {
     activeRef.current = true;
@@ -111,6 +119,7 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
     consecutiveErrorsRef.current = 0;
     setDecoderStatus("loading");
     setAttempts(0);
+    setLastCandidate("");
 
     const previewCanvas = previewCanvasRef.current;
     const previewCtx = previewCanvas?.getContext("2d", { willReadFrequently: true }) ?? null;
@@ -179,6 +188,18 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
             consecutiveErrorsRef.current = 0; // a clean resolve means the decoder is alive
             setDecoderStatus("ready");
             setAttempts((n) => n + 1);
+
+            const best = results[0];
+            if (best) {
+              setLastCandidate(
+                `${best.format} "${best.text || "(empty)"}" valid=${best.isValid}${
+                  best.error ? ` err="${best.error}"` : ""
+                }`
+              );
+            } else {
+              setLastCandidate("(no candidate this frame)");
+            }
+
             // returnErrors:true (above) surfaces checksum-failed reads
             // instead of silently dropping them — necessary to diagnose
             // the original bug, but it means garbled/misread attempts
@@ -359,11 +380,17 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
           {decoderStatus} · {attempts} frames{resolution ? ` · ${resolution}` : ""}
         </p>
       ) : null}
+      {lastCandidate ? (
+        <p className="text-center font-mono text-[11px] leading-snug text-amber-700 dark:text-amber-400">
+          {lastCandidate}
+        </p>
+      ) : null}
 
-      {/* Visible, not a debug artifact: this is the exact upscaled image
-          handed to the decoder on crop passes. If the bars look sharp
-          here and it still won't decode, that's a real bug worth
-          reporting with a screenshot of this box. */}
+      {/* Visible, not a debug artifact: this is the exact image handed
+          to the decoder on crop passes. Read `lastCandidate` above, not
+          this box, for reporting a problem — that text can't be
+          recompressed or rescaled by a photo/chat pipeline the way this
+          image can (learned that the hard way). */}
       <div className="space-y-1">
         <div className="flex items-center justify-center gap-2">
           <p className="text-center text-xs text-muted-foreground">What the decoder sees:</p>
