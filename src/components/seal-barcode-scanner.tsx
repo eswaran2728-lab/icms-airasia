@@ -41,7 +41,7 @@ const DECODE_INTERVAL_MS = 1000 / DECODE_FPS;
 // Bumped whenever this file changes meaningfully — shown on-screen so a
 // field report ("still doesn't work") can be checked against whether the
 // device actually picked up the latest deploy before debugging further.
-const SCANNER_BUILD = "diag-11";
+const SCANNER_BUILD = "diag-12";
 
 /**
  * Live camera barcode scanner for physical seal tags.
@@ -125,6 +125,14 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
     crop: { attempts: 0, anyCandidate: 0, valid: 0 },
   });
   const [statsText, setStatsText] = useState("");
+  // Direct check on the actual captured pixels: a blank/frozen/black
+  // canvas (a known Safari drawImage(videoEl,...) failure mode on some
+  // canvas configurations) would show zero candidates forever with no
+  // other symptom — indistinguishable from "the barcode just won't
+  // decode" without looking at the pixel data itself. min/max luminance
+  // across a sample of pixels tells them apart: a real photo has a wide
+  // spread (dark bars, light background); a blank capture doesn't.
+  const [pixelStats, setPixelStats] = useState("");
 
   useEffect(() => {
     activeRef.current = true;
@@ -140,12 +148,38 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
       crop: { attempts: 0, anyCandidate: 0, valid: 0 },
     };
     setStatsText("");
+    setPixelStats("");
 
     const previewCanvas = previewCanvasRef.current;
     const previewCtx = previewCanvas?.getContext("2d", { willReadFrequently: true }) ?? null;
     if (!fullFrameCanvasRef.current) fullFrameCanvasRef.current = document.createElement("canvas");
     const fullFrameCanvas = fullFrameCanvasRef.current;
     const fullFrameCtx = fullFrameCanvas.getContext("2d", { willReadFrequently: true });
+
+    // Cheap luminance spread check over a sample of pixels — a real
+    // photo has a wide spread (dark bars against a lighter background);
+    // a blank/frozen/black capture (a known Safari drawImage(videoEl)
+    // failure mode on some canvas configurations) does not, and would
+    // otherwise look identical to "the decoder just can't find it" from
+    // the candidate counts alone.
+    const summarizePixels = (img: ImageData): string => {
+      const { data, width, height } = img;
+      const totalPixels = width * height;
+      const step = Math.max(4, Math.floor(totalPixels / 3000) * 4);
+      let min = 255;
+      let max = 0;
+      let sum = 0;
+      let n = 0;
+      for (let i = 0; i < data.length; i += step) {
+        const lum = (data[i] + data[i + 1] + data[i + 2]) / 3;
+        if (lum < min) min = lum;
+        if (lum > max) max = lum;
+        sum += lum;
+        n += 1;
+      }
+      const avg = n ? Math.round(sum / n) : 0;
+      return `${width}x${height} lum ${Math.round(min)}-${Math.round(max)} avg${avg}`;
+    };
 
     // Crop pass: NOT upscaled — this crops the frame down to the guide
     // box for framing/focus only, drawn 1:1. Canvas upscaling can't add
@@ -195,6 +229,7 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
         const image = passKind === "full" ? captureFullFrame(video) : captureCrop(video);
 
         if (image) {
+          setPixelStats(`[${passKind}] ${summarizePixels(image)}`);
           try {
             const results = await readBarcodes(image, {
               // 1D formats only (Code 128/39/93, EAN/UPC, ITF, Codabar,
@@ -421,6 +456,11 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
       {statsText ? (
         <p className="text-center font-mono text-[11px] leading-snug text-muted-foreground">
           {statsText}
+        </p>
+      ) : null}
+      {pixelStats ? (
+        <p className="text-center font-mono text-[11px] leading-snug text-sky-700 dark:text-sky-400">
+          {pixelStats}
         </p>
       ) : null}
 
