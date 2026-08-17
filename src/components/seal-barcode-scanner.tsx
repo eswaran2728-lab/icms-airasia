@@ -33,10 +33,6 @@ const CROP_HEIGHT_PCT = 0.5;
 const CROP_LEFT_PCT = (1 - CROP_WIDTH_PCT) / 2;
 const CROP_TOP_PCT = (1 - CROP_HEIGHT_PCT) / 2;
 
-// Thin bars decode far better with pixels to spare, so the crop is
-// upscaled to at least this width before being handed to the decoder.
-const MIN_CROP_DECODE_WIDTH = 1280;
-
 // Decoding every animation frame is wasted work (battery/heat) without
 // improving accuracy — throttle actual decode attempts.
 const DECODE_FPS = 6;
@@ -45,7 +41,7 @@ const DECODE_INTERVAL_MS = 1000 / DECODE_FPS;
 // Bumped whenever this file changes meaningfully — shown on-screen so a
 // field report ("still doesn't work") can be checked against whether the
 // device actually picked up the latest deploy before debugging further.
-const SCANNER_BUILD = "diag-8";
+const SCANNER_BUILD = "diag-9";
 
 /**
  * Live camera barcode scanner for physical seal tags.
@@ -71,8 +67,9 @@ const SCANNER_BUILD = "diag-8";
  *  - the FULL camera frame, which cannot be thrown off by any mismatch
  *    between the on-screen guide box and the video's intrinsic pixel
  *    dimensions (letterboxing/object-fit), and
- *  - an upscaled centre CROP, which gives thin or small bars more pixels
- *    to work with than the full frame does.
+ *  - a centre CROP at native resolution (no upscaling — see captureCrop
+ *    for why that turned out to actively hurt decoding), which excludes
+ *    whatever's outside the guide box that might confuse the decoder.
  *
  * Accepts every symbology the engine supports rather than a hand-picked
  * list — seal tags come from whichever vendor supplied that batch.
@@ -121,26 +118,24 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
     const fullFrameCanvas = fullFrameCanvasRef.current;
     const fullFrameCtx = fullFrameCanvas.getContext("2d", { willReadFrequently: true });
 
-    // Crop pass: upscaled close-up, also drawn to the visible preview
-    // canvas so the officer (and a bug report screenshot) can see exactly
-    // what's being decoded.
+    // Crop pass: NOT upscaled — this crops the frame down to the guide
+    // box for framing/focus only, drawn 1:1. Canvas upscaling can't add
+    // real pixel detail to a video frame; it only stretches whatever is
+    // already there, and doing that with a non-integer scale factor
+    // produces visible moire banding (confirmed against a real capture)
+    // that sits right on top of the bars and corrupts them regardless of
+    // smoothing settings. Getting more real pixels onto the tag is the
+    // camera's own zoom control's job, not a canvas resize's.
     const captureCrop = (video: HTMLVideoElement): ImageData | null => {
       if (!previewCtx || !previewCanvas) return null;
       const sx = Math.round(video.videoWidth * CROP_LEFT_PCT);
       const sy = Math.round(video.videoHeight * CROP_TOP_PCT);
       const sw = Math.round(video.videoWidth * CROP_WIDTH_PCT);
       const sh = Math.round(video.videoHeight * CROP_HEIGHT_PCT);
-      const scale = sw < MIN_CROP_DECODE_WIDTH ? MIN_CROP_DECODE_WIDTH / sw : 1;
-      previewCanvas.width = Math.round(sw * scale);
-      previewCanvas.height = Math.round(sh * scale);
-      // Smoothing looks nicer but blurs the hard bar/space edges a
-      // barcode decoder measures module widths from — it was quietly
-      // sabotaging every upscaled decode attempt (checksum-failing
-      // consistently, not randomly, which is what a systematically
-      // softened edge does). Nearest-neighbour keeps edges sharp.
-      previewCtx.imageSmoothingEnabled = false;
-      previewCtx.drawImage(video, sx, sy, sw, sh, 0, 0, previewCanvas.width, previewCanvas.height);
-      return previewCtx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+      previewCanvas.width = sw;
+      previewCanvas.height = sh;
+      previewCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+      return previewCtx.getImageData(0, 0, sw, sh);
     };
 
     // Full-frame pass: the raw camera frame at native size, sidestepping
@@ -431,8 +426,8 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
       ) : null}
 
       <p className="text-center text-xs text-muted-foreground">
-        Fill the box with the barcode and hold steady about a hand&apos;s width away. Too much zoom
-        makes it blurry — if it won&apos;t focus, zoom out and move closer instead.
+        Use zoom to fill the box with the barcode — the closer/bigger it looks here, the better it
+        reads. If it won&apos;t focus at high zoom, zoom out and move physically closer instead.
       </p>
     </div>
   );
