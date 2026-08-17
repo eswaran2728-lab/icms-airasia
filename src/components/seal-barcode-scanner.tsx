@@ -71,8 +71,10 @@ const SCANNER_BUILD = "diag-10";
  *    for why that turned out to actively hurt decoding), which excludes
  *    whatever's outside the guide box that might confuse the decoder.
  *
- * Accepts every symbology the engine supports rather than a hand-picked
- * list — seal tags come from whichever vendor supplied that batch.
+ * Restricted to 1D (linear) formats only — Code 128/39/93, EAN/UPC, ITF,
+ * Codabar, and the rest of the "AllLinear" group. Seal tags are always
+ * linear barcodes; a 2D code elsewhere in frame (a shipping label, a
+ * QR-based document) must never be returned as the result.
  *
  * Only the .wasm decoder itself is fetched (once, self-hosted from this
  * app's own origin) — every scan afterwards is local, no per-scan
@@ -177,7 +179,11 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
         if (image) {
           try {
             const results = await readBarcodes(image, {
-              formats: [],
+              // 1D formats only (Code 128/39/93, EAN/UPC, ITF, Codabar,
+              // ...) — seal tags are always linear barcodes, and a QR/
+              // DataMatrix code sitting nearby (e.g. a shipping label
+              // behind the tag) must never be picked up as the result.
+              formats: ["AllLinear"],
               tryHarder: true,
               // The critical option BarcodeDetector couldn't expose —
               // return checksum-failed/error reads instead of silently
