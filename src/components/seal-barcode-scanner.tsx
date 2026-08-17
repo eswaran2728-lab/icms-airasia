@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { BarcodeDetector, setZXingModuleOverrides } from "barcode-detector/pure";
+import { readBarcodes, setZXingModuleOverrides } from "zxing-wasm/reader";
 import { Button } from "@/components/ui/button";
 import { ZoomIn, ZoomOut, X, Lightbulb } from "lucide-react";
 
@@ -10,8 +10,8 @@ import { ZoomIn, ZoomOut, X, Lightbulb } from "lucide-react";
 // copied from node_modules/zxing-wasm's matching version — see the
 // zxing-wasm dependency pin in package.json if that ever needs updating).
 // Airport/enterprise networks at checkpoints often block third-party CDNs
-// outright, which silently starves every detect() call forever. Runs once
-// at module load, before any BarcodeDetector is constructed.
+// outright, which silently starves every decode call forever. Runs once
+// at module load, before any decode is attempted.
 setZXingModuleOverrides({ locateFile: (path) => `/wasm/${path}` });
 
 interface SealBarcodeScannerProps {
@@ -45,15 +45,25 @@ const DECODE_INTERVAL_MS = 1000 / DECODE_FPS;
 // Bumped whenever this file changes meaningfully — shown on-screen so a
 // field report ("still doesn't work") can be checked against whether the
 // device actually picked up the latest deploy before debugging further.
-const SCANNER_BUILD = "diag-4";
+const SCANNER_BUILD = "diag-5";
 
 /**
  * Live camera barcode scanner for physical seal tags.
  *
- * Decodes via the `barcode-detector` package (a WebAssembly build of the
- * real ZXing-C++ library) rather than the native BarcodeDetector API
- * (Safari has none, on iPhone or anywhere else) or html5-qrcode's weak
- * pure-JS fallback — same decode engine and accuracy on every platform.
+ * Decodes via zxing-wasm's readBarcodes() directly — NOT the higher-level
+ * `barcode-detector`/`BarcodeDetector` wrapper this component used
+ * previously. That wrapper hardcodes `returnErrors: false`, which means
+ * ZXing silently drops any read that fails a mandatory format checksum
+ * (Code 128, Code 93, ITF, EAN/UPC all require one) with no error and no
+ * way to override it through that API. Field testing showed the decoder
+ * running correctly against a visibly sharp, well-framed barcode image
+ * (confirmed via the on-screen preview of the exact image handed to the
+ * decoder) with zero results for hundreds of consecutive frames — the
+ * signature of results being silently discarded, not of a decode
+ * failure. `returnErrors: true` here surfaces those instead of dropping
+ * them; the officer still visually re-verifies the scanned value against
+ * the physical seal before submitting; same as every other field in this
+ * app's "blind verification" checkpoints.
  *
  * Every tick alternates between two decode passes, because each one
  * covers the other's blind spot:
@@ -64,9 +74,7 @@ const SCANNER_BUILD = "diag-4";
  *    to work with than the full frame does.
  *
  * Accepts every symbology the engine supports rather than a hand-picked
- * list: seal tags come from whichever vendor supplied that batch, and
- * field testing showed the decoder running correctly (confirmed by the
- * on-screen frame counter) while a narrower format guess never matched.
+ * list — seal tags come from whichever vendor supplied that batch.
  *
  * Only the .wasm decoder itself is fetched (once, self-hosted from this
  * app's own origin) — every scan afterwards is local, no per-scan
@@ -75,8 +83,8 @@ const SCANNER_BUILD = "diag-4";
 export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const detectorRef = useRef<BarcodeDetector | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const fullFrameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastDecodeRef = useRef(0);
   const passRef = useRef(0);
   const consecutiveErrorsRef = useRef(0);
@@ -105,29 +113,39 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
     consecutiveErrorsRef.current = 0;
     setDecoderStatus("loading");
     setAttempts(0);
-    detectorRef.current = new BarcodeDetector({
-      // "any" is a format group meaning every symbology the engine
-      // supports — 1D and 2D alike. Nothing is gained by narrowing it:
-      // the decoder is no slower for accepting more, and a seal tag
-      // printed in an unexpected symbology should still scan.
-      formats: ["any"],
-    });
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d", { willReadFrequently: true }) ?? null;
 
-    const drawUpscaledCrop = (video: HTMLVideoElement): HTMLCanvasElement | null => {
-      if (!ctx || !canvas) return null;
+    const previewCanvas = previewCanvasRef.current;
+    const previewCtx = previewCanvas?.getContext("2d", { willReadFrequently: true }) ?? null;
+    if (!fullFrameCanvasRef.current) fullFrameCanvasRef.current = document.createElement("canvas");
+    const fullFrameCanvas = fullFrameCanvasRef.current;
+    const fullFrameCtx = fullFrameCanvas.getContext("2d", { willReadFrequently: true });
+
+    // Crop pass: upscaled close-up, also drawn to the visible preview
+    // canvas so the officer (and a bug report screenshot) can see exactly
+    // what's being decoded.
+    const captureCrop = (video: HTMLVideoElement): ImageData | null => {
+      if (!previewCtx || !previewCanvas) return null;
       const sx = Math.round(video.videoWidth * CROP_LEFT_PCT);
       const sy = Math.round(video.videoHeight * CROP_TOP_PCT);
       const sw = Math.round(video.videoWidth * CROP_WIDTH_PCT);
       const sh = Math.round(video.videoHeight * CROP_HEIGHT_PCT);
       const scale = sw < MIN_CROP_DECODE_WIDTH ? MIN_CROP_DECODE_WIDTH / sw : 1;
-      canvas.width = Math.round(sw * scale);
-      canvas.height = Math.round(sh * scale);
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-      return canvas;
+      previewCanvas.width = Math.round(sw * scale);
+      previewCanvas.height = Math.round(sh * scale);
+      previewCtx.imageSmoothingEnabled = true;
+      previewCtx.imageSmoothingQuality = "high";
+      previewCtx.drawImage(video, sx, sy, sw, sh, 0, 0, previewCanvas.width, previewCanvas.height);
+      return previewCtx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
+    };
+
+    // Full-frame pass: the raw camera frame at native size, sidestepping
+    // any crop/guide-box misalignment entirely.
+    const captureFullFrame = (video: HTMLVideoElement): ImageData | null => {
+      if (!fullFrameCtx) return null;
+      fullFrameCanvas.width = video.videoWidth;
+      fullFrameCanvas.height = video.videoHeight;
+      fullFrameCtx.drawImage(video, 0, 0);
+      return fullFrameCtx.getImageData(0, 0, fullFrameCanvas.width, fullFrameCanvas.height);
     };
 
     const scanLoop = async (video: HTMLVideoElement) => {
@@ -144,34 +162,45 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
 
         // Alternate full-frame and upscaled-crop passes — see the class
         // comment for why neither alone is sufficient.
-        const source =
-          passRef.current % 2 === 1 ? video : (drawUpscaledCrop(video) ?? video);
+        const image =
+          passRef.current % 2 === 1 ? captureFullFrame(video) : captureCrop(video);
 
-        try {
-          const barcodes = await detectorRef.current!.detect(source);
-          consecutiveErrorsRef.current = 0; // a clean resolve means the decoder is alive
-          setDecoderStatus("ready");
-          setAttempts((n) => n + 1);
-          if (barcodes.length > 0) {
-            handledRef.current = true;
-            onDetectedRef.current(barcodes[0].rawValue.trim());
-            return;
-          }
-        } catch (err) {
-          // detect() rejecting is a real failure (decoder/wasm load
-          // problem), not a "no barcode in this frame" miss — an empty
-          // match resolves normally with barcodes.length === 0 instead.
-          // A few isolated rejects can happen transiently; only give up
-          // and surface an error once it's clearly not recovering.
-          consecutiveErrorsRef.current += 1;
-          console.error("Seal barcode decode failed:", err);
-          if (consecutiveErrorsRef.current >= 5) {
-            setDecoderStatus("failed");
-            setError(
-              "Barcode decoder failed to load — check your connection, or type the seal number instead."
-            );
-            activeRef.current = false;
-            return;
+        if (image) {
+          try {
+            const results = await readBarcodes(image, {
+              formats: [],
+              tryHarder: true,
+              // The critical option BarcodeDetector couldn't expose —
+              // return checksum-failed/error reads instead of silently
+              // discarding them. See the class comment.
+              returnErrors: true,
+              textMode: "Plain",
+            });
+            consecutiveErrorsRef.current = 0; // a clean resolve means the decoder is alive
+            setDecoderStatus("ready");
+            setAttempts((n) => n + 1);
+            const hit = results.find((r) => r.text.trim().length > 0);
+            if (hit) {
+              handledRef.current = true;
+              onDetectedRef.current(hit.text.trim());
+              return;
+            }
+          } catch (err) {
+            // A genuine rejection (decoder/wasm load problem), not a
+            // "no barcode in this frame" miss — that resolves normally
+            // with an empty results array instead. A few isolated
+            // rejects can happen transiently; only give up and surface
+            // an error once it's clearly not recovering.
+            consecutiveErrorsRef.current += 1;
+            console.error("Seal barcode decode failed:", err);
+            if (consecutiveErrorsRef.current >= 5) {
+              setDecoderStatus("failed");
+              setError(
+                "Barcode decoder failed to load — check your connection, or type the seal number instead."
+              );
+              activeRef.current = false;
+              return;
+            }
           }
         }
       }
@@ -305,13 +334,11 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
       {/* Visible, not a debug artifact: this is the exact upscaled image
           handed to the decoder on crop passes. If the bars look sharp
           here and it still won't decode, that's a real bug worth
-          reporting with a screenshot of this box. If they look blurry
-          or smeared here, no decoder can read that — it's the shot, not
-          the code. */}
+          reporting with a screenshot of this box. */}
       <div className="space-y-1">
         <p className="text-center text-xs text-muted-foreground">What the decoder sees:</p>
         <canvas
-          ref={canvasRef}
+          ref={previewCanvasRef}
           className="mx-auto block w-full max-w-xs rounded-md border bg-black/90"
         />
       </div>
