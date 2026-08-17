@@ -41,7 +41,7 @@ const DECODE_INTERVAL_MS = 1000 / DECODE_FPS;
 // Bumped whenever this file changes meaningfully — shown on-screen so a
 // field report ("still doesn't work") can be checked against whether the
 // device actually picked up the latest deploy before debugging further.
-const SCANNER_BUILD = "diag-12";
+const SCANNER_BUILD = "diag-13";
 
 /**
  * Live camera barcode scanner for physical seal tags.
@@ -181,6 +181,34 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
       return `${width}x${height} lum ${Math.round(min)}-${Math.round(max)} avg${avg}`;
     };
 
+    // Stretches whatever luminance contrast is actually present in this
+    // specific image to fill the full 0-255 range. Matters most for the
+    // crop pass: a global full-frame min/max (dominated by unrelated
+    // high-contrast elements like paper or a nearby printed code) can
+    // look fine while the barcode's own local region — especially dark
+    // ink on a saturated colour like orange, which the eye reads as
+    // high-contrast via hue but a luminance-only binarizer does not —
+    // has a much narrower real range. Mutates in place; a no-op on an
+    // already-blank/flat capture (nothing to stretch).
+    const stretchContrast = (img: ImageData): void => {
+      const { data } = img;
+      let min = 255;
+      let max = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const lum = (data[i] + data[i + 1] + data[i + 2]) / 3;
+        if (lum < min) min = lum;
+        if (lum > max) max = lum;
+      }
+      const range = max - min;
+      if (range < 10) return;
+      const scale = 255 / range;
+      for (let i = 0; i < data.length; i += 4) {
+        data[i] = Math.min(255, Math.max(0, (data[i] - min) * scale));
+        data[i + 1] = Math.min(255, Math.max(0, (data[i + 1] - min) * scale));
+        data[i + 2] = Math.min(255, Math.max(0, (data[i + 2] - min) * scale));
+      }
+    };
+
     // Crop pass: NOT upscaled — this crops the frame down to the guide
     // box for framing/focus only, drawn 1:1. Canvas upscaling can't add
     // real pixel detail to a video frame; it only stretches whatever is
@@ -188,7 +216,10 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
     // produces visible moire banding (confirmed against a real capture)
     // that sits right on top of the bars and corrupts them regardless of
     // smoothing settings. Getting more real pixels onto the tag is the
-    // camera's own zoom control's job, not a canvas resize's.
+    // camera's own zoom control's job, not a canvas resize's. Contrast
+    // is stretched here (not on the full-frame pass — see
+    // stretchContrast) and written back to the visible preview canvas,
+    // so what's shown in "What the decoder sees" matches what's decoded.
     const captureCrop = (video: HTMLVideoElement): ImageData | null => {
       if (!previewCtx || !previewCanvas) return null;
       const sx = Math.round(video.videoWidth * CROP_LEFT_PCT);
@@ -198,7 +229,10 @@ export function SealBarcodeScanner({ onDetected, onClose }: SealBarcodeScannerPr
       previewCanvas.width = sw;
       previewCanvas.height = sh;
       previewCtx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
-      return previewCtx.getImageData(0, 0, sw, sh);
+      const img = previewCtx.getImageData(0, 0, sw, sh);
+      stretchContrast(img);
+      previewCtx.putImageData(img, 0, 0);
+      return img;
     };
 
     // Full-frame pass: the raw camera frame at native size, sidestepping
