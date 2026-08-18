@@ -22,11 +22,17 @@ export type Direction = "OUTBOUND" | "INBOUND";
 
 /**
  * Outbound-only routing chosen at Part A creation (default AIRCRAFT,
- * unchanged behavior). INBOUND transactions always stay AIRCRAFT — Hub
- * and REDQ are never valid inbound. See
- * supabase/migrations/20260817000002_multiroute_redq_restructure.sql.
+ * unchanged behavior). INBOUND transactions always stay AIRCRAFT — Hub,
+ * REDQ and MAINTENANCE are never valid inbound. MAINTENANCE is never
+ * chosen directly — it's auto-derived server-side from the AIRCRAFT route
+ * plus the "Vehicle Maintenance" cargo type (GSE Workshop has no security
+ * checkpoint and maintenance duration is unknown up front, so the
+ * transaction completes at Part C instead of waiting on a Part D that can
+ * never happen). See
+ * supabase/migrations/20260817000002_multiroute_redq_restructure.sql and
+ * supabase/migrations/20260818000001_maintenance_route.sql.
  */
-export type TransactionRoute = "AIRCRAFT" | "HUB" | "REDQ";
+export type TransactionRoute = "AIRCRAFT" | "HUB" | "REDQ" | "MAINTENANCE";
 export type HubDestination = "PEN" | "JHB" | "NILAI";
 
 export type DeliveryLocation = "SRA_WAREHOUSE" | "AIRCRAFT";

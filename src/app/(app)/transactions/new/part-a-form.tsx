@@ -190,9 +190,16 @@ export function PartAForm({
   const direction = selectedOption?.direction ?? null;
   const route = selectedOption?.route ?? null;
 
+  // GSE Workshop maintenance is auto-derived from the cargo-type checklist
+  // (no separate movement-type choice) — preview only, the server makes
+  // the authoritative call at insert time using this same rule.
+  const isMaintenance =
+    route === "AIRCRAFT" && direction === "OUTBOUND" && cargoTypes.includes("VEHICLE_MAINTENANCE");
+  const effectiveRoute = isMaintenance ? "MAINTENANCE" : route;
+
   const flow =
-    direction && route
-      ? ["A · Warehouse", ...stepsFor(direction, route).map((s) => s.shortLabel)].join("  →  ")
+    direction && effectiveRoute
+      ? ["A · Warehouse", ...stepsFor(direction, effectiveRoute).map((s) => s.shortLabel)].join("  →  ")
       : null;
 
   const hubDestinationReady = movement !== "HUB" || hubDestination !== "";
@@ -447,6 +454,12 @@ export function PartAForm({
               </div>
               {cargoTypes.length === 0 ? (
                 <p className="text-xs text-muted-foreground">Select at least one.</p>
+              ) : null}
+              {isMaintenance ? (
+                <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
+                  GSE Workshop (Maintenance): this transaction completes at Part C — Airport Post
+                  (Post 6). The workshop has no security checkpoint, so Part D does not apply.
+                </p>
               ) : null}
             </div>
 

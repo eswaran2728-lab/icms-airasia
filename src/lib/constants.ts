@@ -74,6 +74,7 @@ export const ROUTE_LABELS: Record<TransactionRoute, string> = {
   AIRCRAFT: "Aircraft (standard)",
   HUB: "Hub",
   REDQ: "REDQ → FOB",
+  MAINTENANCE: "GSE Workshop (Maintenance)",
 };
 
 /** Hub destinations only — REDQ is a route, not a Hub destination. */

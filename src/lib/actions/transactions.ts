@@ -328,6 +328,17 @@ export async function createTransaction(
       error: "Select at least one cargo type. / Pilih sekurang-kurangnya satu jenis kargo.",
     };
   }
+
+  // GSE Workshop maintenance is auto-derived, never chosen directly: the
+  // workshop has no security checkpoint and maintenance duration is
+  // unknown up front, so a plain Outbound movement tagged "Vehicle
+  // Maintenance" completes at Part C instead of waiting on a Part D that
+  // can never happen. Hub/REDQ already have their own terminal step, so
+  // this only overrides the default AIRCRAFT route.
+  const effectiveRoute: TransactionRoute =
+    route === "AIRCRAFT" && direction === "OUTBOUND" && cargoTypes.includes("VEHICLE_MAINTENANCE")
+      ? "MAINTENANCE"
+      : route;
   if (!seals) {
     return { error: "Add at least one seal with a number, type and color." };
   }
@@ -441,7 +452,7 @@ export async function createTransaction(
     .insert({
       id: txId,
       direction,
-      route,
+      route: effectiveRoute,
       hub_destination: hubDestination,
       vehicle_number: vehicleNumber,
       driver_name: driverName,

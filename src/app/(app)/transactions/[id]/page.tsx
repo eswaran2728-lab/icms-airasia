@@ -19,6 +19,7 @@ import {
   DELIVERY_LOCATION_LABELS,
   HUB_DESTINATION_LABELS,
   INCIDENT_TYPE_LABELS,
+  ROUTE_LABELS,
 } from "@/lib/constants";
 import { formatDateTime } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -335,7 +336,7 @@ export default async function TransactionDetailPage({
                 value={
                   transaction.route === "HUB" && transaction.hub_destination
                     ? `Hub — ${HUB_DESTINATION_LABELS[transaction.hub_destination]}`
-                    : "REDQ → FOB"
+                    : ROUTE_LABELS[transaction.route]
                 }
               />
             ) : null}
@@ -662,7 +663,9 @@ export default async function TransactionDetailPage({
               ) : null}
             </CardContent>
           </Card>
-        ) : transaction.direction === "OUTBOUND" && transaction.route !== "HUB" ? (
+        ) : transaction.direction === "OUTBOUND" &&
+          transaction.route !== "HUB" &&
+          transaction.route !== "MAINTENANCE" ? (
           <PendingPartCard
             id={id}
             title="Part D — Delivery"
@@ -677,7 +680,9 @@ export default async function TransactionDetailPage({
             <CardContent className="text-sm text-muted-foreground">
               {transaction.route === "HUB"
                 ? "Not applicable to HUB-route transactions — Part Hub is the terminal step."
-                : "Not applicable to inbound transactions."}
+                : transaction.route === "MAINTENANCE"
+                  ? "Not applicable — GSE Workshop has no security checkpoint; this transaction completed at Part C."
+                  : "Not applicable to inbound transactions."}
             </CardContent>
           </Card>
         ) : null}

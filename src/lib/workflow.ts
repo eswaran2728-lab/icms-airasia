@@ -14,6 +14,11 @@ import type { Direction, Role, TransactionRoute, TransactionStatus } from "./dat
  *   AIRCRAFT (default, unchanged): A -> B -> C -> D
  *   HUB:  A -> B -> Part Hub (terminal — no C/D)
  *   REDQ: A -> B -> Part REDQ (re-seal) -> C -> D
+ *   MAINTENANCE: A -> B -> C (terminal — no D). Auto-derived (never chosen
+ *     directly) from AIRCRAFT + the "Vehicle Maintenance" cargo type — the
+ *     final destination (GSE Workshop) has no security checkpoint and the
+ *     maintenance duration is unknown up front, so Part C finalizes the
+ *     transaction instead of waiting on a Part D that can never happen.
  */
 
 export type CheckpointPart = "part_b" | "part_c" | "part_d" | "part_hub" | "part_redq";
@@ -109,6 +114,20 @@ const HUB_ROUTE_WORKFLOW: CheckpointStep[] = [
   },
 ];
 
+const MAINTENANCE_ROUTE_WORKFLOW: CheckpointStep[] = [
+  OUTBOUND_PART_B,
+  {
+    part: "part_c",
+    slug: "part-c",
+    label: `${PART_C_LABEL} — final; GSE Workshop maintenance has no separate checkpoint`,
+    shortLabel: "C · Airport Post (final)",
+    role: "post6_avsec",
+    requiredStatus: "INFLIGHT_POST_APPROVED",
+    nextStatus: "COMPLETED",
+    finalizes: true,
+  },
+];
+
 const REDQ_ROUTE_WORKFLOW: CheckpointStep[] = [
   OUTBOUND_PART_B,
   {
@@ -156,6 +175,7 @@ export function stepsFor(
   if (direction === "INBOUND") return INBOUND_WORKFLOW;
   if (route === "HUB") return HUB_ROUTE_WORKFLOW;
   if (route === "REDQ") return REDQ_ROUTE_WORKFLOW;
+  if (route === "MAINTENANCE") return MAINTENANCE_ROUTE_WORKFLOW;
   return AIRCRAFT_ROUTE_WORKFLOW;
 }
 
@@ -219,7 +239,7 @@ export function checkpointOrderError(
 
   if (!step) {
     const notApplicable: Record<string, string> = {
-      part_d: `${PART_D_LABEL} does not apply to inbound transactions, or to HUB-route outbound transactions (Part Hub is the terminal step). / Bahagian D tidak terpakai.`,
+      part_d: `${PART_D_LABEL} does not apply to inbound transactions, to HUB-route outbound transactions (Part Hub is the terminal step), or to MAINTENANCE-route outbound transactions (Part C is the terminal step). / Bahagian D tidak terpakai.`,
       part_c: `${PART_C_LABEL} does not apply to HUB-route transactions. / Bahagian C tidak terpakai untuk laluan HUB.`,
       part_hub: `${PART_HUB_LABEL} only applies to HUB-route outbound transactions. / Bahagian Hub hanya terpakai untuk transaksi HUB.`,
       part_redq: `${PART_REDQ_LABEL} only applies to REDQ-route outbound transactions. / Bahagian REDQ hanya terpakai untuk transaksi REDQ.`,
