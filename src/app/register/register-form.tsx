@@ -8,13 +8,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { ROLE_LABELS } from "@/lib/constants";
+import { DRIVER_VENDOR_ROLES, isDriverVendorVariant } from "@/lib/app-variant";
 import type { Role } from "@/lib/database.types";
 
 const initialState: RegisterState = { error: null, success: null };
 
-const REGISTERABLE_ROLES = (Object.keys(ROLE_LABELS) as Role[]).filter(
-  (role) => role !== "supervisor"
-);
+const REGISTERABLE_ROLES = isDriverVendorVariant
+  ? DRIVER_VENDOR_ROLES
+  : (Object.keys(ROLE_LABELS) as Role[]).filter((role) => role !== "supervisor");
 
 export function RegisterForm() {
   const [state, formAction, pending] = useActionState(registerStaff, initialState);

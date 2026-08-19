@@ -3,6 +3,7 @@ import {
   ClipboardList,
   LayoutDashboard,
   ListChecks,
+  PackageCheck,
   PlusCircle,
   ScanLine,
   ShieldAlert,
@@ -16,6 +17,7 @@ import {
 import { requireProfile } from "@/lib/auth";
 import { signOut } from "@/lib/actions/auth";
 import { getLang } from "@/lib/actions/language";
+import { isDriverVendorVariant } from "@/lib/app-variant";
 import { LanguageToggle } from "@/components/language-toggle";
 import { ROLE_COLORS, ROLE_LABELS } from "@/lib/constants";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -43,6 +45,19 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     "hub_avsec",
     "redq_avsec",
   ].includes(profile.role);
+  // Vendor Movement Module: vendor sees only its own deliveries (RLS),
+  // warehouse_pic/post2_avsec/supervisor/enforcement see every delivery.
+  const canSeeVendorList = [
+    "vendor",
+    "warehouse_pic",
+    "post2_avsec",
+    "supervisor",
+    "enforcement",
+  ].includes(profile.role);
+  // The cut-down driver_vendor deployment (see src/lib/app-variant.ts)
+  // drops the catering Transactions/Incidents views — neither role there
+  // has any use for the wider catering oversight list.
+  const showCateringNav = !isDriverVendorVariant;
 
   const nav = [
     { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, show: true },
@@ -64,8 +79,14 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       icon: ScanLine,
       show: canScan,
     },
-    { href: "/transactions", label: "Transactions", icon: ClipboardList, show: true },
-    { href: "/incidents", label: "Incidents", icon: ShieldAlert, show: true },
+    {
+      href: "/vendor-transactions",
+      label: "Vendor Deliveries",
+      icon: PackageCheck,
+      show: canSeeVendorList,
+    },
+    { href: "/transactions", label: "Transactions", icon: ClipboardList, show: showCateringNav },
+    { href: "/incidents", label: "Incidents", icon: ShieldAlert, show: showCateringNav },
     {
       href: "/reports",
       label: "Reports",
@@ -108,6 +129,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       "/transactions/new",
       "/vendor-transactions/new",
       "/scan",
+      "/vendor-transactions",
       "/transactions",
       "/incidents",
     ].includes(item.href)
