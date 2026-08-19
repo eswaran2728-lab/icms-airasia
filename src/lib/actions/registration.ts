@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { requireRole } from "@/lib/auth";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { DRIVER_VENDOR_ROLES, isDriverVendorVariant } from "@/lib/app-variant";
 import type { Role } from "@/lib/database.types";
 
 export interface RegisterState {
@@ -10,7 +11,7 @@ export interface RegisterState {
   success: string | null;
 }
 
-const REGISTERABLE_ROLES: Role[] = [
+const ALL_REGISTERABLE_ROLES: Role[] = [
   "warehouse_pic",
   "post2_avsec",
   "post6_avsec",
@@ -20,6 +21,14 @@ const REGISTERABLE_ROLES: Role[] = [
   "hub_avsec",
   "redq_avsec",
 ];
+
+// Re-validated server-side, the same way the client-side picker in
+// register-form.tsx is narrowed — the driver_vendor deployment (see
+// src/lib/app-variant.ts) must not let anyone actually register outside
+// its two roles even if they bypass the form.
+const REGISTERABLE_ROLES: Role[] = isDriverVendorVariant
+  ? DRIVER_VENDOR_ROLES
+  : ALL_REGISTERABLE_ROLES;
 
 /**
  * Public: new staff self-registration. Creates a real Supabase Auth
